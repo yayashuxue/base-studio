@@ -5,15 +5,10 @@ import Foundation
 
 /// Always-visible floating Stop dock.
 ///
-/// Studio Console aesthetic:
-///  - Sits **bottom-center** of the main screen (not top — top blocks the
-///    menu bar / notification area / notch and is awkward inside captures).
-///  - Compact frosted dock: pulsing red dot · monospaced timer · stacked
-///    audio meters · optional mirrored webcam circle · a wide pill Stop
-///    button with a warm-red fill. Subtle red glow shadow signals the live
-///    recording state without screaming.
-///  - Matches `Theme.swift` constants where possible (replicated as raw NS
-///    values here because this is an AppKit panel, not a SwiftUI surface).
+/// Default position is **top-center**, just below the menu bar — the user
+/// can drag it anywhere (panel is movable by background). Compact frosted
+/// dock: pulsing red dot · monospaced timer · stacked audio meters ·
+/// optional mirrored webcam circle · wide pill Stop button.
 @MainActor
 final class RecordingPanel {
     private var panel: NSPanel?
@@ -61,13 +56,13 @@ final class RecordingPanel {
 
         let size = NSSize(width: width, height: height)
         let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        // Bottom-center, with a comfortable 28pt clearance from the screen
-        // edge — matches Screen Studio's recording dock placement and avoids
-        // Dock collisions thanks to NSScreen.visibleFrame.
+        // Top-center, just below the menu bar. The user can drag it elsewhere
+        // (panel.isMovableByWindowBackground = true) — this is just the
+        // initial placement.
         let visible = NSScreen.main?.visibleFrame ?? screen
         let origin = NSPoint(
             x: visible.midX - size.width / 2,
-            y: visible.minY + 28
+            y: visible.maxY - size.height - 12
         )
 
         let panel = NSPanel(
@@ -83,8 +78,9 @@ final class RecordingPanel {
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
 
-        // Frosted-dark dock surface, with a soft red rim that whispers
-        // "live" rather than shouts it.
+        // Frosted-dark dock surface. No coloured outline — the pulsing red
+        // dot + timer carry the "live" signal; an outline reads as a stray
+        // border when the panel sits over content.
         let bg = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
         bg.material = .hudWindow
         bg.state = .active
@@ -92,8 +88,6 @@ final class RecordingPanel {
         bg.wantsLayer = true
         bg.layer?.cornerRadius = 18
         bg.layer?.masksToBounds = true
-        bg.layer?.borderWidth = 1
-        bg.layer?.borderColor = Self.recordingRed.withAlphaComponent(0.30).cgColor
 
         // 1pt top inner highlight — "lit from above".
         let highlight = CAGradientLayer()

@@ -14,11 +14,7 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            // Studio Console warm-dark backdrop.
-            LinearGradient(
-                colors: [BS.Color.bgTop, BS.Color.bgBottom],
-                startPoint: .top, endPoint: .bottom
-            ).ignoresSafeArea()
+            BS.Color.bgGradient.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 topBar
@@ -36,7 +32,14 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear { vm.webcamPreview = webcamPreview }
+        .onAppear {
+            vm.webcamPreview = webcamPreview
+            // `.onChange` doesn't fire on initial value, so honour the
+            // current `includeWebcam` default explicitly on first appear.
+            if vm.includeWebcam {
+                Task { await webcamPreview.startIfPossible() }
+            }
+        }
         .onChange(of: vm.includeWebcam) { newValue in
             Task {
                 if newValue { await webcamPreview.startIfPossible() }
@@ -63,8 +66,8 @@ struct ContentView: View {
         }
         .padding(.horizontal, BS.Space.regular)
         .padding(.vertical, BS.Space.tight + 2)
-        .background(.ultraThinMaterial)
         .background(BS.Color.surface.opacity(0.6))
+        .background(.ultraThinMaterial)
     }
 
     private var hairline: some View {
@@ -102,15 +105,12 @@ struct ContentView: View {
                 Text("Export")
                     .font(BS.Font.labelStrong)
             }
-            .foregroundStyle(Color(hex: 0x1A1102))
+            .foregroundStyle(BS.Color.onAccent)
             .padding(.horizontal, BS.Space.snug)
             .padding(.vertical, BS.Space.tight - 2)
             .background(
                 RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .fill(LinearGradient(
-                        colors: [BS.Color.accent, BS.Color.accent.opacity(0.82)],
-                        startPoint: .top, endPoint: .bottom
-                    ))
+                    .fill(BS.Color.accentGradient)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
@@ -124,7 +124,7 @@ struct ContentView: View {
     private var canRecord: Bool {
         switch vm.phase {
         case .idle, .done, .failed: return true
-        case .recording, .finalizing: return false
+        case .countingDown, .recording, .finalizing: return false
         }
     }
     private var isExportingNow: Bool {
@@ -137,6 +137,13 @@ struct ContentView: View {
         switch vm.phase {
         case .idle:
             EmptyView()
+        case .countingDown:
+            HStack(spacing: BS.Space.tight - 2) {
+                ProgressView().controlSize(.small).tint(BS.Color.recordingRed)
+                Text("Starting…")
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.recordingRed)
+            }
         case .recording:
             HStack(spacing: BS.Space.tight - 2) {
                 Circle().fill(BS.Color.recordingRed)

@@ -41,6 +41,9 @@ public enum BS {
         // Accent. ONE warm orange accent — used sparingly for primary action.
         public static let accent        = SwiftUI.Color(hex: 0xF0A93B)
         public static let accentMuted   = SwiftUI.Color(hex: 0x8C6420)
+        /// Foreground colour for text/icons drawn on top of `accent` —
+        /// warm near-black so amber stays legible without going pure black.
+        public static let onAccent      = SwiftUI.Color(hex: 0x1A1102)
 
         // Recording red. Reserved for the recording state and stop affordance.
         public static let recordingRed  = SwiftUI.Color(hex: 0xFF3B30)
@@ -54,6 +57,22 @@ public enum BS {
         // Audio meters.
         public static let meterMic      = SwiftUI.Color(hex: 0x6BCB77)
         public static let meterSystem   = SwiftUI.Color(hex: 0x4DA3FF)
+
+        // Pre-computed gradients. SwiftUI re-allocates inline `LinearGradient`
+        // values on every body re-eval; hoist common ones so views just
+        // reference them.
+        public static let bgGradient = LinearGradient(
+            colors: [bgTop, bgBottom],
+            startPoint: .top, endPoint: .bottom
+        )
+        public static let accentGradient = LinearGradient(
+            colors: [accent, accent.opacity(0.78)],
+            startPoint: .top, endPoint: .bottom
+        )
+        public static let topHighlightGradient = LinearGradient(
+            colors: [topHighlight, .clear],
+            startPoint: .top, endPoint: .center
+        )
     }
 
     // MARK: - Typography
@@ -175,6 +194,41 @@ public extension View {
             .tracking(1.2)
             .foregroundStyle(BS.Color.textTertiary)
             .textCase(.uppercase)
+    }
+
+    /// Capsule pill background — accent fill + ring when on, surface fill +
+    /// hairline when off. Use on Buttons that act as binary toggles.
+    func bsSelectablePill(isOn: Bool) -> some View {
+        self
+            .background(
+                Capsule(style: .continuous)
+                    .fill(isOn ? BS.Color.accent.opacity(0.18) : BS.Color.surface)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        isOn ? BS.Color.accent.opacity(0.55) : BS.Color.hairline,
+                        lineWidth: 1
+                    )
+            )
+    }
+
+    /// Rounded-rect tile background — accent fill + ring when on, surface
+    /// fill + hairline when off. Use for segmented canvas tiles, grid
+    /// pickers, etc.
+    func bsSelectableTile(isOn: Bool, radius: CGFloat = BS.Radius.chip) -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(isOn ? BS.Color.accent.opacity(0.18) : BS.Color.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(
+                        isOn ? BS.Color.accent.opacity(0.55) : BS.Color.hairline,
+                        lineWidth: 1
+                    )
+            )
     }
 }
 

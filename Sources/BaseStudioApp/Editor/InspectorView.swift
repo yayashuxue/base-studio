@@ -46,11 +46,6 @@ struct InspectorView: View {
         }
     }
 
-    /// Wraps a section's body content in standard inspector spacing.
-    private func sectionBody<Content: View>(_ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: BS.Space.snug, content: content)
-    }
-
     // MARK: - Canvas (aspect ratio)
 
     @ViewBuilder
@@ -81,17 +76,7 @@ struct InspectorView: View {
                     .foregroundStyle(isOn ? BS.Color.textPrimary : BS.Color.textSecondary)
             }
             .frame(width: 54, height: 50)
-            .background(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .fill(isOn ? BS.Color.accent.opacity(0.14) : BS.Color.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .strokeBorder(
-                        isOn ? BS.Color.accent.opacity(0.5) : BS.Color.hairline,
-                        lineWidth: 1
-                    )
-            )
+            .bsSelectableTile(isOn: isOn)
         }
         .buttonStyle(.plain)
     }
@@ -136,21 +121,7 @@ struct InspectorView: View {
                         }
                         .frame(maxWidth: .infinity, minHeight: 36)
                         .foregroundStyle(vm.exportAudio == mode ? BS.Color.textPrimary : BS.Color.textSecondary)
-                        .background(
-                            RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                                .fill(vm.exportAudio == mode
-                                      ? BS.Color.accent.opacity(0.18)
-                                      : BS.Color.surface)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                                .strokeBorder(
-                                    vm.exportAudio == mode
-                                        ? BS.Color.accent.opacity(0.45)
-                                        : BS.Color.hairline,
-                                    lineWidth: 1
-                                )
-                        )
+                        .bsSelectableTile(isOn: vm.exportAudio == mode)
                     }
                     .buttonStyle(.plain)
                 }
@@ -535,21 +506,7 @@ struct InspectorView: View {
                         .font(.system(size: 14))
                         .frame(width: 28, height: 28)
                         .foregroundStyle(Int(cornerVal) == idx ? BS.Color.textPrimary : BS.Color.textSecondary)
-                        .background(
-                            RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                                .fill(Int(cornerVal) == idx
-                                      ? BS.Color.accent.opacity(0.20)
-                                      : BS.Color.surface)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                                .strokeBorder(
-                                    Int(cornerVal) == idx
-                                        ? BS.Color.accent.opacity(0.5)
-                                        : BS.Color.hairline,
-                                    lineWidth: 1
-                                )
-                        )
+                        .bsSelectableTile(isOn: Int(cornerVal) == idx, radius: BS.Radius.chip - 2)
                 }
                 .buttonStyle(.plain)
             }
@@ -578,17 +535,7 @@ struct InspectorView: View {
                 .font(BS.Font.caption)
                 .foregroundStyle(isOn ? BS.Color.textPrimary : BS.Color.textSecondary)
                 .frame(maxWidth: .infinity, minHeight: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                        .fill(isOn ? BS.Color.accent.opacity(0.20) : BS.Color.surface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                        .strokeBorder(
-                            isOn ? BS.Color.accent.opacity(0.50) : BS.Color.hairline,
-                            lineWidth: 1
-                        )
-                )
+                .bsSelectableTile(isOn: isOn, radius: BS.Radius.chip - 2)
         }
         .buttonStyle(.plain)
     }

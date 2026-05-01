@@ -50,13 +50,21 @@ struct HomeView: View {
     // MARK: - Title
 
     private var titleArea: some View {
-        VStack(alignment: .leading, spacing: BS.Space.micro) {
-            Text("Base Studio")
-                .font(BS.Font.display)
-                .foregroundStyle(BS.Color.textPrimary)
-            Text("Record your screen, then edit live with auto-zoom, padding, and webcam.")
-                .font(BS.Font.label)
-                .foregroundStyle(BS.Color.textSecondary)
+        HStack(alignment: .center, spacing: BS.Space.snug) {
+            // 2pt amber accent rule — "lit" indicator next to the title.
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(BS.Color.accent)
+                .frame(width: 3, height: 36)
+                .shadow(color: BS.Color.accent.opacity(0.5), radius: 6, x: 0, y: 0)
+            VStack(alignment: .leading, spacing: BS.Space.micro) {
+                Text("Base Studio")
+                    .font(BS.Font.display)
+                    .foregroundStyle(BS.Color.textPrimary)
+                Text("Record your screen, then edit live with auto-zoom, padding, and webcam.")
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.textSecondary)
+            }
+            Spacer()
         }
     }
 
@@ -76,27 +84,28 @@ struct HomeView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: BS.Radius.panel, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [BS.Color.topHighlight, .clear],
-                                startPoint: .top, endPoint: .center
-                            ),
-                            lineWidth: 1
-                        )
+                        .strokeBorder(BS.Color.topHighlightGradient, lineWidth: 1)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: BS.Radius.panel, style: .continuous)
                         .strokeBorder(BS.Color.hairline, lineWidth: 1)
                 )
 
+            // Soft radial vignette — gives the tile a cinema-like centre
+            // glow without going overboard.
+            RadialGradient(
+                colors: [BS.Color.accent.opacity(0.07), .clear],
+                center: .center, startRadius: 0, endRadius: 280
+            )
+
             // Centred display glyph + dims, evoking what will be captured.
             VStack(spacing: BS.Space.snug) {
                 Image(systemName: targetGlyph)
-                    .font(.system(size: 40, weight: .light))
-                    .foregroundStyle(BS.Color.textTertiary)
+                    .font(.system(size: 44, weight: .ultraLight))
+                    .foregroundStyle(BS.Color.textSecondary)
                 Text(targetTitle)
                     .font(BS.Font.labelStrong)
-                    .foregroundStyle(BS.Color.textSecondary)
+                    .foregroundStyle(BS.Color.textPrimary)
                 Text(targetSubtitle)
                     .font(BS.Font.mono)
                     .foregroundStyle(BS.Color.textTertiary)
@@ -316,21 +325,7 @@ struct HomeView: View {
             .foregroundStyle(isOn.wrappedValue ? BS.Color.textPrimary : BS.Color.textSecondary)
             .padding(.horizontal, BS.Space.regular)
             .padding(.vertical, BS.Space.tight + 2)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(isOn.wrappedValue
-                          ? BS.Color.accent.opacity(0.18)
-                          : BS.Color.surface)
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(
-                        isOn.wrappedValue
-                            ? BS.Color.accent.opacity(0.55)
-                            : BS.Color.hairline,
-                        lineWidth: 1
-                    )
-            )
+            .bsSelectablePill(isOn: isOn.wrappedValue)
         }
         .buttonStyle(.plain)
     }
@@ -350,21 +345,23 @@ struct HomeView: View {
                 .padding(.horizontal, BS.Space.section)
                 .padding(.vertical, BS.Space.snug + 2)
                 .background(
-                    LinearGradient(
-                        colors: [BS.Color.accent, BS.Color.accent.opacity(0.78)],
-                        startPoint: .top, endPoint: .bottom
-                    ),
+                    BS.Color.accentGradient,
                     in: RoundedRectangle(cornerRadius: BS.Radius.card, style: .continuous)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: BS.Radius.card, style: .continuous)
                         .strokeBorder(BS.Color.topHighlight, lineWidth: 1)
                 )
-                .foregroundStyle(Color(hex: 0x1A1102))   // warm near-black for legible text on amber
+                .foregroundStyle(BS.Color.onAccent)
                 .shadow(color: BS.Color.accent.opacity(0.35), radius: 18, x: 0, y: 6)
+                .opacity(vm.canStartRecording ? 1.0 : 0.45)
             }
             .buttonStyle(.plain)
             .keyboardShortcut("r", modifiers: [.command])
+            // Disable while a recording is already in flight (countdown /
+            // recording / finalizing). Without this, rapid double-clicks or
+            // a held ⌘R fire startRecording multiple times.
+            .disabled(!vm.canStartRecording)
 
             Text("⌘R")
                 .font(BS.Font.mono)
