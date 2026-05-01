@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.basestudio.dev</string>
+    <key>CFBundleName</key>
+    <string>Base Studio</string>
+    <key>CFBundleDisplayName</key>
+    <string>Base Studio</string>
+    <key>CFBundleExecutable</key>
+    <string>BaseStudio</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleVersion</key>
+    <string>0.1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSCameraUseContinuityCameraDeviceType</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>Base Studio needs the camera to record the webcam overlay alongside your screen.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Base Studio needs the microphone to record audio narration alongside your screen.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Base Studio uses speech recognition to auto-generate captions from your recordings.</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>

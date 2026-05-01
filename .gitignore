@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+build/Base Studio.app/
+*.xcodeproj/
+.DS_Store
