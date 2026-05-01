@@ -1,5 +1,8 @@
+import AppKit
 import BaseStudioCore
+import BaseStudioRender
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Right-side inspector panel of the editor.
 ///
@@ -286,32 +289,131 @@ struct InspectorView: View {
 
     @ViewBuilder
     private func backgroundControls(_ inst: NodeInstance) -> some View {
-        // Pick a preset — that's it. Each preset bakes in its gradient
-        // style, so there is no separate Linear/Radial/Mesh row, no color
-        // pickers, and no shape sliders to fiddle with. Per julie:
-        // "简单简单再简单 — 几个图就好".
-        let cols = [GridItem(.adaptive(minimum: 64), spacing: BS.Space.tight)]
+        // Five gradient presets + every image you've ever uploaded + a "+" tile
+        // for new uploads. Image uploads live in a global library
+        // (~/Library/Application Support/BaseStudio/Backgrounds/) so they show
+        // up across recordings, not just this one. Per julie: "保持简化丝滑的UX —
+        // 几个图就好，可以upload."
+        let bgImage = state.project.backgroundImageRel
+        let curTop = inst.bindings["bgTop"]?.constantValue
+        let uploads = BackgroundImageStore.list()
+        let cols = [GridItem(.adaptive(minimum: 56), spacing: BS.Space.tight)]
         LazyVGrid(columns: cols, spacing: BS.Space.tight) {
             ForEach(BackgroundPreset.all, id: \.name) { p in
                 Button(action: { applyPreset(inst, p) }) {
-                    VStack(spacing: 4) {
-                        RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                            .fill(LinearGradient(
-                                colors: [Color(p.top.toNSColor()), Color(p.bottom.toNSColor())],
-                                startPoint: .top, endPoint: .bottom))
-                            .frame(height: 44)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                                    .strokeBorder(BS.Color.hairline, lineWidth: 1)
-                            )
-                        Text(p.name)
-                            .font(BS.Font.caption)
-                            .foregroundStyle(BS.Color.textTertiary)
+                    bgTile(selected: bgImage == nil && curTop == p.top) {
+                        tileShape().fill(presetTileFill(p))
                     }
                 }
                 .buttonStyle(.plain)
                 .help(p.name)
             }
+            ForEach(uploads, id: \.self) { name in
+                Button(action: { state.selectBackgroundImage(name) }) {
+                    bgTile(selected: bgImage == name) {
+                        if let preview = uploadedThumbnail(name) {
+                            Image(nsImage: preview)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .clipShape(tileShape())
+                        } else {
+                            tileShape().fill(BS.Color.hairline)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .help(name)
+            }
+            Button(action: pickBackgroundImage) {
+                bgTile(selected: false) {
+                    tileShape()
+                        .fill(Color.white.opacity(0.04))
+                        .overlay(
+                            Image(systemName: "plus")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(BS.Color.textTertiary)
+                        )
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Upload an image")
+        }
+    }
+
+    private func tileShape() -> RoundedRectangle {
+        RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+    }
+
+    /// Uniform 48pt tile chrome: shared frame size + selection ring. Children
+    /// supply the fill (gradient, image, or "+").
+    @ViewBuilder
+    private func bgTile<Content: View>(selected: Bool, @ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(height: 48)
+            .frame(maxWidth: .infinity)
+            .overlay(
+                tileShape()
+                    .strokeBorder(selected ? BS.Color.accent : BS.Color.hairline,
+                                  lineWidth: selected ? 1.5 : 1)
+            )
+    }
+
+    /// 64×48 thumbnail of an uploaded background, loaded once per filename.
+    /// SwiftUI re-evaluates `body` on every state tick, so without memoising
+    /// we'd hit `NSImage(contentsOf:)` for every uploaded tile per render.
+    private func uploadedThumbnail(_ name: String) -> NSImage? {
+        if let cached = Self.thumbnailCache[name] { return cached }
+        guard let url = BackgroundImageStore.url(for: name),
+              let img = NSImage(contentsOf: url) else { return nil }
+        // Force-rasterise to a small bitmap so SwiftUI doesn't keep a 12MP
+        // representation alive per tile.
+        let target = NSSize(width: 96, height: 72)
+        let thumb = NSImage(size: target)
+        thumb.lockFocus()
+        img.draw(in: NSRect(origin: .zero, size: target))
+        thumb.unlockFocus()
+        Self.thumbnailCache[name] = thumb
+        return thumb
+    }
+    private static var thumbnailCache: [String: NSImage] = [:]
+
+    private func pickBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Use as background"
+        panel.message = "Pick a PNG, JPG, HEIC, or WebP image."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try state.uploadBackgroundImage(from: url)
+        } catch {
+            // Surface in the renderFailureMessage banner — there's no other
+            // chrome on this surface and a silent failure on a click is
+            // worse than a one-line note above the canvas.
+            state.renderFailureMessage = "Couldn't import background: \(error.localizedDescription)"
+        }
+    }
+
+    /// Mirror `BackgroundCompose`'s style in the tile so the picker is WYSIWYG —
+    /// linear → vertical stripe, radial → soft glow, mesh → diagonal blend.
+    private func presetTileFill(_ p: BackgroundPreset) -> AnyShapeStyle {
+        let top = Color(p.top.toNSColor())
+        let bottom = Color(p.bottom.toNSColor())
+        switch p.style {
+        case 1:
+            return AnyShapeStyle(RadialGradient(
+                colors: [top, bottom],
+                center: .center, startRadius: 0, endRadius: 36))
+        case 2:
+            return AnyShapeStyle(LinearGradient(
+                colors: [top, bottom],
+                startPoint: .bottomLeading, endPoint: .topTrailing))
+        default:
+            return AnyShapeStyle(LinearGradient(
+                colors: [top, bottom],
+                startPoint: .top, endPoint: .bottom))
         }
     }
 
@@ -596,6 +698,10 @@ struct InspectorView: View {
     }
 
     private func applyPreset(_ inst: NodeInstance, _ p: BackgroundPreset) {
+        // Clicking a gradient implicitly clears any uploaded image —
+        // otherwise the image would still paint and the gradient change
+        // would look like it did nothing.
+        state.clearBackgroundImage()
         state.updateNodeBinding(instanceID: inst.instanceID, paramName: "bgTop", .constant(p.top))
         state.updateNodeBinding(instanceID: inst.instanceID, paramName: "bgBottom", .constant(p.bottom))
         state.updateNodeBinding(instanceID: inst.instanceID, paramName: "bgStyle",
@@ -607,6 +713,10 @@ struct InspectorView: View {
 extension ParamBinding {
     var constantScalar: Double? {
         if case .constant(let v) = self, case .scalar(let s) = v { return s }
+        return nil
+    }
+    var constantValue: ParamValue? {
+        if case .constant(let v) = self { return v }
         return nil
     }
 }
