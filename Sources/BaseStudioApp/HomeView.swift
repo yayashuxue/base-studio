@@ -20,6 +20,7 @@ import SwiftUI
 struct HomeView: View {
     @ObservedObject var vm: RecordingViewModel
     @ObservedObject var webcamPreview: WebcamPreviewSession
+    @ObservedObject var screenPreview: ScreenPreviewSession
 
     var body: some View {
         HStack(spacing: 0) {
@@ -91,26 +92,39 @@ struct HomeView: View {
                         .strokeBorder(BS.Color.hairline, lineWidth: 1)
                 )
 
-            // Soft radial vignette — gives the tile a cinema-like centre
-            // glow without going overboard.
-            RadialGradient(
-                colors: [BS.Color.accent.opacity(0.07), .clear],
-                center: .center, startRadius: 0, endRadius: 280
-            )
+            // Live screen thumbnail — actual content of what will be
+            // captured. Updates ~1.2× / sec from `ScreenPreviewSession`.
+            // While we're waiting for the first frame, fall back to the
+            // glyph + label placeholder so the tile never reads empty.
+            if let img = screenPreview.currentImage {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.medium)
+                    .scaledToFill()
+                    .clipped()
+                    .clipShape(RoundedRectangle(
+                        cornerRadius: BS.Radius.panel, style: .continuous))
+            } else {
+                // Soft radial vignette — gives the tile a cinema-like centre
+                // glow while the first frame is in flight.
+                RadialGradient(
+                    colors: [BS.Color.accent.opacity(0.07), .clear],
+                    center: .center, startRadius: 0, endRadius: 280
+                )
 
-            // Centred display glyph + dims, evoking what will be captured.
-            VStack(spacing: BS.Space.snug) {
-                Image(systemName: targetGlyph)
-                    .font(.system(size: 44, weight: .ultraLight))
-                    .foregroundStyle(BS.Color.textSecondary)
-                Text(targetTitle)
-                    .font(BS.Font.labelStrong)
-                    .foregroundStyle(BS.Color.textPrimary)
-                Text(targetSubtitle)
-                    .font(BS.Font.mono)
-                    .foregroundStyle(BS.Color.textTertiary)
+                VStack(spacing: BS.Space.snug) {
+                    Image(systemName: targetGlyph)
+                        .font(.system(size: 44, weight: .ultraLight))
+                        .foregroundStyle(BS.Color.textSecondary)
+                    Text(targetTitle)
+                        .font(BS.Font.labelStrong)
+                        .foregroundStyle(BS.Color.textPrimary)
+                    Text(targetSubtitle)
+                        .font(BS.Font.mono)
+                        .foregroundStyle(BS.Color.textTertiary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // Webcam overlay — a small circle in the corner, like Screen Studio.
             if vm.includeWebcam {

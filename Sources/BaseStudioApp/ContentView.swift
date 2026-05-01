@@ -11,6 +11,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var vm = RecordingViewModel()
     @StateObject private var webcamPreview = WebcamPreviewSession()
+    @StateObject private var screenPreview = ScreenPreviewSession()
 
     var body: some View {
         ZStack {
@@ -35,15 +36,29 @@ struct ContentView: View {
         .onAppear {
             vm.webcamPreview = webcamPreview
             // `.onChange` doesn't fire on initial value, so honour the
-            // current `includeWebcam` default explicitly on first appear.
+            // current `includeWebcam` default + selectedTarget explicitly
+            // on first appear.
             if vm.includeWebcam {
                 Task { await webcamPreview.startIfPossible() }
             }
+            screenPreview.setTarget(vm.selectedTarget)
         }
         .onChange(of: vm.includeWebcam) { newValue in
             Task {
                 if newValue { await webcamPreview.startIfPossible() }
                 else { webcamPreview.stop() }
+            }
+        }
+        .onChange(of: vm.selectedTarget) { newTarget in
+            screenPreview.setTarget(newTarget)
+        }
+        .onChange(of: vm.phase) { phase in
+            // Pause screen preview during/after recording — both to free the
+            // capture path while ScreenRecorder is running and because the
+            // preview becomes irrelevant once we're past Home.
+            switch phase {
+            case .recording, .finalizing, .countingDown: screenPreview.stop()
+            case .idle, .done, .failed: screenPreview.start()
             }
         }
     }
@@ -226,7 +241,7 @@ struct ContentView: View {
     // MARK: - Welcome / editor panes
 
     private var welcomePane: some View {
-        HomeView(vm: vm, webcamPreview: webcamPreview)
+        HomeView(vm: vm, webcamPreview: webcamPreview, screenPreview: screenPreview)
     }
 
     @ViewBuilder
