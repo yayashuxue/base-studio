@@ -1,87 +1,155 @@
 import BaseStudioCore
 import SwiftUI
 
-/// Right-side panel of the editor. Auto-builds controls per known node type.
-/// Mutations go through `EditorState`, which triggers a render.
+/// Right-side inspector panel of the editor.
+///
+/// Studio Console aesthetic: each control group is its own card-like section
+/// with an uppercase section header (icon + label, tight tracking), 16pt
+/// vertical rhythm between sections, and value displays in a mono font so
+/// numbers stay column-aligned. Per-effect controls are auto-built from the
+/// node type — adding a new effect is one new `case` in `controls(for:)`.
 struct InspectorView: View {
     @ObservedObject var state: EditorState
     @ObservedObject var vm: RecordingViewModel
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Inspector")
-                    .font(.title3.bold())
-                    .padding(.bottom, 4)
-
+            VStack(alignment: .leading, spacing: BS.Space.section) {
                 canvasSection
-                Divider().opacity(0.2)
-
                 exportSection
-                Divider().opacity(0.2)
-
                 if let regID = state.selectedRegionID,
                    let region = state.project.zoomRegions.first(where: { $0.id == regID }) {
                     selectedRegionSection(region)
-                    Divider().opacity(0.2)
                 }
-
                 ForEach(state.project.nodeGraph.nodes, id: \.instanceID) { instance in
                     nodeSection(for: instance)
-                    Divider().opacity(0.2)
                 }
+                Spacer(minLength: BS.Space.regular)
             }
-            .padding(16)
+            .padding(.horizontal, BS.Space.regular)
+            .padding(.top, BS.Space.regular)
+            .padding(.bottom, BS.Space.section)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    // MARK: - Section header
+
+    private func sectionHeader(_ title: String, icon: String) -> some View {
+        HStack(spacing: BS.Space.tight - 2) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(BS.Color.textTertiary)
+            Text(title)
+                .bsSectionHeader()
+            Spacer()
+        }
+    }
+
+    /// Wraps a section's body content in standard inspector spacing.
+    private func sectionBody<Content: View>(_ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: BS.Space.snug, content: content)
+    }
+
+    // MARK: - Canvas (aspect ratio)
+
+    @ViewBuilder
+    private var canvasSection: some View {
+        VStack(alignment: .leading, spacing: BS.Space.snug) {
+            sectionHeader("Canvas", icon: "rectangle.dashed")
+            HStack(spacing: BS.Space.tight) {
+                ForEach(CanvasSpec.presets, id: \.self) { preset in
+                    canvasTile(preset)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func canvasTile(_ preset: CanvasSpec) -> some View {
+        let isOn = state.project.canvas == preset
+        let w: CGFloat = 26 * CGFloat(preset.widthPx) / CGFloat(max(preset.widthPx, preset.heightPx))
+        let h: CGFloat = 26 * CGFloat(preset.heightPx) / CGFloat(max(preset.widthPx, preset.heightPx))
+        return Button(action: { state.setCanvas(preset) }) {
+            VStack(spacing: BS.Space.micro) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(isOn ? BS.Color.accent : BS.Color.textTertiary.opacity(0.6))
+                    .frame(width: w, height: h)
+                    .frame(width: 26, height: 26)
+                Text(preset.label)
+                    .font(BS.Font.caption)
+                    .foregroundStyle(isOn ? BS.Color.textPrimary : BS.Color.textSecondary)
+            }
+            .frame(width: 54, height: 50)
+            .background(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .fill(isOn ? BS.Color.accent.opacity(0.14) : BS.Color.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .strokeBorder(
+                        isOn ? BS.Color.accent.opacity(0.5) : BS.Color.hairline,
+                        lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Export
 
     @ViewBuilder
     private var exportSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Export").font(.headline)
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: BS.Space.snug) {
+            sectionHeader("Export", icon: "square.and.arrow.up")
+
+            HStack(spacing: BS.Space.micro + 2) {
                 ForEach(RecordingViewModel.ExportResolution.allCases) { res in
-                    Button(action: { vm.exportResolution = res }) {
-                        Text(res.label)
-                            .font(.system(size: 11))
-                            .frame(maxWidth: .infinity, minHeight: 22)
-                            .background(
-                                vm.exportResolution == res
-                                    ? Color.accentColor.opacity(0.7)
-                                    : Color.white.opacity(0.06),
-                                in: RoundedRectangle(cornerRadius: 4)
-                            )
-                    }
-                    .buttonStyle(.plain)
+                    segmentedButton(
+                        text: res.label,
+                        isOn: vm.exportResolution == res,
+                        action: { vm.exportResolution = res }
+                    )
                 }
             }
+
             HStack {
                 Text(targetDimsLabel)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(BS.Font.mono)
+                    .foregroundStyle(BS.Color.textSecondary)
                 Spacer()
                 Text("≈\(estimatedBitrateMbps) Mbps")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(BS.Font.mono)
+                    .foregroundStyle(BS.Color.textTertiary)
             }
 
-            Text("Audio").font(.caption).foregroundStyle(.secondary).padding(.top, 4)
-            HStack(spacing: 6) {
+            Text("Audio")
+                .font(BS.Font.caption)
+                .foregroundStyle(BS.Color.textTertiary)
+                .padding(.top, BS.Space.micro)
+            HStack(spacing: BS.Space.micro + 2) {
                 ForEach(RecordingViewModel.ExportAudio.allCases) { mode in
                     Button(action: { vm.exportAudio = mode }) {
                         VStack(spacing: 2) {
                             Image(systemName: mode.icon).font(.system(size: 11))
-                            Text(mode.label).font(.system(size: 10))
+                            Text(mode.label).font(BS.Font.caption)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .foregroundStyle(vm.exportAudio == mode ? BS.Color.textPrimary : BS.Color.textSecondary)
                         .background(
-                            vm.exportAudio == mode
-                                ? Color.accentColor.opacity(0.7)
-                                : Color.white.opacity(0.06),
-                            in: RoundedRectangle(cornerRadius: 4)
+                            RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                                .fill(vm.exportAudio == mode
+                                      ? BS.Color.accent.opacity(0.18)
+                                      : BS.Color.surface)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                                .strokeBorder(
+                                    vm.exportAudio == mode
+                                        ? BS.Color.accent.opacity(0.45)
+                                        : BS.Color.hairline,
+                                    lineWidth: 1
+                                )
                         )
                     }
                     .buttonStyle(.plain)
@@ -103,122 +171,62 @@ struct InspectorView: View {
         vm.exportResolution.defaultBitrate / 1_000_000
     }
 
-    // MARK: - Canvas (aspect ratio)
-
-    @ViewBuilder
-    private var canvasSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Canvas").font(.headline)
-            HStack(spacing: 6) {
-                ForEach(CanvasSpec.presets, id: \.self) { preset in
-                    Button(action: { state.setCanvas(preset) }) {
-                        VStack(spacing: 3) {
-                            // Tiny aspect-ratio glyph.
-                            let w: CGFloat = 22 * CGFloat(preset.widthPx) / CGFloat(max(preset.widthPx, preset.heightPx))
-                            let h: CGFloat = 22 * CGFloat(preset.heightPx) / CGFloat(max(preset.widthPx, preset.heightPx))
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(state.project.canvas == preset
-                                      ? Color.accentColor
-                                      : Color.white.opacity(0.25))
-                                .frame(width: w, height: h)
-                                .frame(width: 22, height: 22)
-                            Text(preset.label).font(.system(size: 10))
-                        }
-                        .frame(width: 50, height: 44)
-                        .background(
-                            state.project.canvas == preset
-                                ? Color.accentColor.opacity(0.15)
-                                : Color.white.opacity(0.04),
-                            in: RoundedRectangle(cornerRadius: 6)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
+    // MARK: - Selected zoom region
 
     @ViewBuilder
     private func selectedRegionSection(_ region: ZoomRegion) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Zoom Region").font(.headline)
+        VStack(alignment: .leading, spacing: BS.Space.snug) {
+            HStack(spacing: BS.Space.tight - 2) {
+                Image(systemName: "scope")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(BS.Color.textTertiary)
+                Text("Zoom Region")
+                    .bsSectionHeader()
                 Spacer()
                 Button(action: { state.deleteZoomRegion(region.id) }) {
                     Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(BS.Color.recordingRed.opacity(0.85))
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.red.opacity(0.85))
+                .help("Delete region")
             }
 
-            HStack {
-                Text("Scale").font(.caption)
-                Spacer()
-                Text(String(format: "%.2f×", region.scale))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            // Discrete preset buttons (Screen Studio-style).
-            HStack(spacing: 6) {
+            valueRow(label: "Scale", value: String(format: "%.2f×", region.scale))
+            HStack(spacing: BS.Space.micro + 2) {
                 ForEach([1.2, 1.4, 1.6, 1.8, 2.0, 2.5], id: \.self) { v in
-                    Button(action: {
-                        state.updateZoomRegion(region.id) { $0.scale = v }
-                    }) {
-                        Text(String(format: "%.1f×", v))
-                            .font(.system(size: 11))
-                            .frame(maxWidth: .infinity, minHeight: 22)
-                            .background(
-                                abs(region.scale - v) < 0.05
-                                    ? Color.purple.opacity(0.7)
-                                    : Color.white.opacity(0.06),
-                                in: RoundedRectangle(cornerRadius: 4)
-                            )
-                    }
-                    .buttonStyle(.plain)
+                    segmentedButton(
+                        text: String(format: "%.1f×", v),
+                        isOn: abs(region.scale - v) < 0.05,
+                        action: { state.updateZoomRegion(region.id) { $0.scale = v } }
+                    )
                 }
             }
 
-            Toggle("Follow cursor", isOn: Binding(
+            Toggle(isOn: Binding(
                 get: { region.followCursor },
                 set: { v in state.updateZoomRegion(region.id) { $0.followCursor = v } }
-            ))
+            )) {
+                Text("Follow cursor")
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.textSecondary)
+            }
             .toggleStyle(.switch)
             .controlSize(.mini)
+            .tint(BS.Color.accent)
 
-            // Speed picker (Screen Studio-style discrete buttons).
-            HStack {
-                Text("Speed").font(.caption)
-                Spacer()
-                Text(String(format: "%.1f×", region.speed))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            HStack(spacing: 6) {
+            valueRow(label: "Speed", value: String(format: "%.1f×", region.speed))
+            HStack(spacing: BS.Space.micro + 2) {
                 ForEach([1.0, 1.2, 1.4, 1.6, 1.8, 2.0], id: \.self) { v in
-                    Button(action: {
-                        state.updateZoomRegion(region.id) { $0.speed = v }
-                    }) {
-                        Text(v == 1.0 ? "1×" : String(format: "%.1f×", v))
-                            .font(.system(size: 11))
-                            .frame(maxWidth: .infinity, minHeight: 22)
-                            .background(
-                                abs(region.speed - v) < 0.05
-                                    ? Color.accentColor.opacity(0.7)
-                                    : Color.white.opacity(0.06),
-                                in: RoundedRectangle(cornerRadius: 4)
-                            )
-                    }
-                    .buttonStyle(.plain)
+                    segmentedButton(
+                        text: v == 1.0 ? "1×" : String(format: "%.1f×", v),
+                        isOn: abs(region.speed - v) < 0.05,
+                        action: { state.updateZoomRegion(region.id) { $0.speed = v } }
+                    )
                 }
             }
 
-            HStack {
-                Text("Transition").font(.caption)
-                Spacer()
-                Text(String(format: "%.2fs", region.transitionSec))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
+            valueRow(label: "Transition", value: String(format: "%.2fs", region.transitionSec))
             Slider(
                 value: Binding(
                     get: { region.transitionSec },
@@ -226,23 +234,33 @@ struct InspectorView: View {
                 ),
                 in: 0.05...1.5
             )
+            .tint(BS.Color.accent)
         }
     }
 
+    // MARK: - Per-node sections
+
     @ViewBuilder
     private func nodeSection(for inst: NodeInstance) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: BS.Space.snug) {
+            HStack(spacing: BS.Space.tight - 2) {
+                Image(systemName: nodeIcon(for: inst.nodeType))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(BS.Color.textTertiary)
                 Text(displayName(for: inst.nodeType))
-                    .font(.headline)
+                    .bsSectionHeader()
                 Spacer()
                 Toggle("", isOn: Binding(
                     get: { inst.enabled },
                     set: { state.setNodeEnabled(instanceID: inst.instanceID, $0) }
-                )).toggleStyle(.switch).labelsHidden().controlSize(.mini)
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .controlSize(.mini)
+                .tint(BS.Color.accent)
             }
             controls(for: inst)
-                .opacity(inst.enabled ? 1 : 0.4)
+                .opacity(inst.enabled ? 1 : 0.45)
                 .disabled(!inst.enabled)
         }
     }
@@ -256,6 +274,18 @@ struct InspectorView: View {
         case "webcam_overlay": return "Webcam"
         case "caption_overlay": return "Captions"
         default: return id
+        }
+    }
+
+    private func nodeIcon(for id: String) -> String {
+        switch id {
+        case "background_compose": return "square.fill.on.square.fill"
+        case "zoom": return "plus.magnifyingglass"
+        case "cursor_paint": return "cursorarrow"
+        case "click_bubble": return "circle.dotted"
+        case "webcam_overlay": return "person.crop.circle.fill"
+        case "caption_overlay": return "captions.bubble"
+        default: return "slider.horizontal.3"
         }
     }
 
@@ -275,7 +305,9 @@ struct InspectorView: View {
         case "caption_overlay":
             captionControls(inst)
         default:
-            Text("(no editor)").foregroundStyle(.tertiary)
+            Text("(no editor)")
+                .font(BS.Font.caption)
+                .foregroundStyle(BS.Color.textTertiary)
         }
     }
 
@@ -288,45 +320,43 @@ struct InspectorView: View {
         scalarSlider(inst, name: "shadowRadiusPx", label: "Shadow blur", range: 0...100)
         scalarSlider(inst, name: "shadowOpacity", label: "Shadow strength", range: 0...1)
 
-        // Style picker (linear / radial / mesh).
         let curStyle = Int(inst.bindings["bgStyle"]?.constantScalar ?? 0)
-        HStack(spacing: 6) {
+        HStack(spacing: BS.Space.micro + 2) {
             ForEach([(0, "Linear"), (1, "Radial"), (2, "Mesh")], id: \.0) { (v, label) in
-                Button(action: {
-                    state.updateNodeBinding(
-                        instanceID: inst.instanceID,
-                        paramName: "bgStyle",
-                        .constant(.scalar(Double(v)))
-                    )
-                }) {
-                    Text(label)
-                        .font(.system(size: 11))
-                        .frame(maxWidth: .infinity, minHeight: 22)
-                        .background(
-                            curStyle == v
-                                ? Color.accentColor.opacity(0.65)
-                                : Color.white.opacity(0.06),
-                            in: RoundedRectangle(cornerRadius: 4)
+                segmentedButton(
+                    text: label,
+                    isOn: curStyle == v,
+                    action: {
+                        state.updateNodeBinding(
+                            instanceID: inst.instanceID,
+                            paramName: "bgStyle",
+                            .constant(.scalar(Double(v)))
                         )
-                }
-                .buttonStyle(.plain)
+                    }
+                )
             }
         }
 
         colorRow(inst, name: "bgTop", label: "Top color")
         colorRow(inst, name: "bgBottom", label: "Bottom color")
 
-        Text("Presets").font(.caption).foregroundStyle(.secondary)
-        let cols = [GridItem(.adaptive(minimum: 30), spacing: 6)]
-        LazyVGrid(columns: cols, spacing: 6) {
+        Text("Presets")
+            .font(BS.Font.caption)
+            .foregroundStyle(BS.Color.textTertiary)
+            .padding(.top, BS.Space.micro)
+        let cols = [GridItem(.adaptive(minimum: 32), spacing: BS.Space.tight - 2)]
+        LazyVGrid(columns: cols, spacing: BS.Space.tight - 2) {
             ForEach(BackgroundPreset.all, id: \.name) { p in
                 Button(action: { applyPreset(inst, p) }) {
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
                         .fill(LinearGradient(
                             colors: [Color(p.top.toNSColor()), Color(p.bottom.toNSColor())],
                             startPoint: .top, endPoint: .bottom))
-                        .frame(width: 30, height: 30)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(.white.opacity(0.15)))
+                        .frame(width: 32, height: 32)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+                                .strokeBorder(BS.Color.hairline, lineWidth: 1)
+                        )
                 }
                 .buttonStyle(.plain)
                 .help(p.name)
@@ -334,18 +364,16 @@ struct InspectorView: View {
         }
     }
 
-    // MARK: - Zoom
+    // MARK: - Zoom (manual + event-driven)
 
     @ViewBuilder
     private func zoomControls(_ inst: NodeInstance) -> some View {
-        if case .eventDriven(var ed) = inst.bindings["scale"] ?? .constant(.scalar(1)) {
-            HStack {
-                Text("Peak zoom")
-                Spacer()
-                Text(String(format: "%.2f×", ed.peak.asScalar ?? 1))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
+        let scaleBinding = inst.bindings["scale"] ?? .constant(.scalar(1))
+        if case .eventDriven(var ed) = scaleBinding {
+            valueRow(
+                label: "Peak zoom",
+                value: String(format: "%.2f×", ed.peak.asScalar ?? 1)
+            )
             Slider(
                 value: Binding(
                     get: { ed.peak.asScalar ?? 1 },
@@ -360,13 +388,12 @@ struct InspectorView: View {
                 ),
                 in: 1.0...2.5
             )
-            HStack {
-                Text("Hold")
-                Spacer()
-                Text(String(format: "%.1fs", ed.envelope.hold))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
+            .tint(BS.Color.accent)
+
+            valueRow(
+                label: "Hold",
+                value: String(format: "%.1fs", ed.envelope.hold)
+            )
             Slider(
                 value: Binding(
                     get: { ed.envelope.hold },
@@ -384,8 +411,30 @@ struct InspectorView: View {
                 ),
                 in: 0.2...3.0
             )
+            .tint(BS.Color.accent)
         } else {
-            Text("Manual zoom binding (TODO)").foregroundStyle(.tertiary)
+            // Manual zoom (constant scalar). Show a slider so the user can
+            // tune the global multiplier; auto-zoom regions still bind
+            // .eventDriven on top of this.
+            let cur = scaleBinding.constantScalar ?? 1.0
+            valueRow(label: "Manual zoom", value: String(format: "%.2f×", cur))
+            Slider(
+                value: Binding(
+                    get: { cur },
+                    set: { v in
+                        state.updateNodeBinding(
+                            instanceID: inst.instanceID,
+                            paramName: "scale",
+                            .constant(.scalar(v))
+                        )
+                    }
+                ),
+                in: 1.0...2.5
+            )
+            .tint(BS.Color.accent)
+            Text("Click on the timeline to add a click-driven zoom region.")
+                .font(BS.Font.caption)
+                .foregroundStyle(BS.Color.textTertiary)
         }
     }
 
@@ -406,12 +455,12 @@ struct InspectorView: View {
     @ViewBuilder
     private func captionControls(_ inst: NodeInstance) -> some View {
         if state.project.captions.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: BS.Space.tight) {
                 Text("No captions yet. Generate from your microphone audio.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(BS.Font.caption)
+                    .foregroundStyle(BS.Color.textSecondary)
                 Button(action: { state.generateCaptions() }) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: BS.Space.tight - 2) {
                         if state.isTranscribing {
                             ProgressView().controlSize(.small)
                             Text("Transcribing…")
@@ -420,17 +469,34 @@ struct InspectorView: View {
                             Text("Generate Captions")
                         }
                     }
-                    .frame(maxWidth: .infinity, minHeight: 28)
+                    .font(BS.Font.labelStrong)
+                    .foregroundStyle(Color(hex: 0x1A1102))
+                    .frame(maxWidth: .infinity, minHeight: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                            .fill(LinearGradient(
+                                colors: [BS.Color.accent, BS.Color.accent.opacity(0.82)],
+                                startPoint: .top, endPoint: .bottom
+                            ))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                            .strokeBorder(BS.Color.topHighlight, lineWidth: 1)
+                    )
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .disabled(state.isTranscribing)
             }
         } else {
             HStack {
-                Text("\(state.project.captions.count) captions").font(.caption)
+                Text("\(state.project.captions.count) captions")
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.textSecondary)
                 Spacer()
                 Button(action: { state.generateCaptions() }) {
                     Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                        .foregroundStyle(BS.Color.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .help("Regenerate")
@@ -441,8 +507,8 @@ struct InspectorView: View {
         }
         if let err = state.transcribeError {
             Text(err)
-                .font(.caption2)
-                .foregroundStyle(.red)
+                .font(BS.Font.caption)
+                .foregroundStyle(BS.Color.recordingRed)
                 .lineLimit(3)
         }
     }
@@ -451,10 +517,11 @@ struct InspectorView: View {
     private func webcamControls(_ inst: NodeInstance) -> some View {
         scalarSlider(inst, name: "sizePx", label: "Webcam size", range: 120...420)
         scalarSlider(inst, name: "marginPx", label: "Margin", range: 0...160)
-        // Corner picker.
-        let cornerVal = (inst.bindings["corner"]?.constantScalar ?? 3)
-        HStack(spacing: 8) {
-            Text("Corner").font(.caption).foregroundStyle(.secondary)
+        let cornerVal = inst.bindings["corner"]?.constantScalar ?? 3
+        HStack(spacing: BS.Space.tight) {
+            Text("Corner")
+                .font(BS.Font.label)
+                .foregroundStyle(BS.Color.textSecondary)
             Spacer()
             ForEach([(0, "↖"), (1, "↗"), (2, "↙"), (3, "↘")], id: \.0) { (idx, label) in
                 Button(action: {
@@ -465,34 +532,74 @@ struct InspectorView: View {
                     )
                 }) {
                     Text(label)
-                        .font(.title3)
+                        .font(.system(size: 14))
                         .frame(width: 28, height: 28)
+                        .foregroundStyle(Int(cornerVal) == idx ? BS.Color.textPrimary : BS.Color.textSecondary)
                         .background(
-                            Int(cornerVal) == idx
-                                ? Color.accentColor.opacity(0.6)
-                                : Color.white.opacity(0.06),
-                            in: RoundedRectangle(cornerRadius: 6)
+                            RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+                                .fill(Int(cornerVal) == idx
+                                      ? BS.Color.accent.opacity(0.20)
+                                      : BS.Color.surface)
                         )
-                }.buttonStyle(.plain)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+                                .strokeBorder(
+                                    Int(cornerVal) == idx
+                                        ? BS.Color.accent.opacity(0.5)
+                                        : BS.Color.hairline,
+                                    lineWidth: 1
+                                )
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
     }
 
-    // MARK: - shared helpers
+    // MARK: - Shared helpers
+
+    /// Label · monospaced value, in a row.
+    private func valueRow(label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(BS.Font.label)
+                .foregroundStyle(BS.Color.textSecondary)
+            Spacer()
+            Text(value)
+                .font(BS.Font.mono)
+                .foregroundStyle(BS.Color.textPrimary)
+        }
+    }
+
+    /// Single segmented-style button used in the picker rows.
+    private func segmentedButton(text: String, isOn: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(text)
+                .font(BS.Font.caption)
+                .foregroundStyle(isOn ? BS.Color.textPrimary : BS.Color.textSecondary)
+                .frame(maxWidth: .infinity, minHeight: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+                        .fill(isOn ? BS.Color.accent.opacity(0.20) : BS.Color.surface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+                        .strokeBorder(
+                            isOn ? BS.Color.accent.opacity(0.50) : BS.Color.hairline,
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+    }
 
     @ViewBuilder
     private func scalarSlider(
         _ inst: NodeInstance, name: String, label: String, range: ClosedRange<Double>
     ) -> some View {
         let cur = inst.bindings[name]?.constantScalar ?? defaultFor(inst, name) ?? range.lowerBound
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(label).font(.caption)
-                Spacer()
-                Text(String(format: "%.0f", cur))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
+        VStack(alignment: .leading, spacing: BS.Space.micro) {
+            valueRow(label: label, value: String(format: "%.0f", cur))
             Slider(
                 value: Binding(
                     get: { cur },
@@ -506,6 +613,7 @@ struct InspectorView: View {
                 ),
                 in: range
             )
+            .tint(BS.Color.accent)
         }
     }
 
@@ -527,7 +635,9 @@ struct InspectorView: View {
     @ViewBuilder
     private func colorRow(_ inst: NodeInstance, name: String, label: String) -> some View {
         HStack {
-            Text(label).font(.caption)
+            Text(label)
+                .font(BS.Font.label)
+                .foregroundStyle(BS.Color.textSecondary)
             Spacer()
             ColorPicker(
                 "",

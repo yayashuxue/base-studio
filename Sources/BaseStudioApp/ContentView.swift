@@ -2,36 +2,41 @@ import BaseStudioCore
 import BaseStudioPlayback
 import SwiftUI
 
+/// Application shell.
+///
+/// Three modes share the same chrome:
+///  - **Home** — pre-record landing (HomeView).
+///  - **Editor** — recordings list · canvas + scrubber + timeline · inspector.
+///  - **Export bar** — slides up from the bottom while/after exporting.
 struct ContentView: View {
     @StateObject private var vm = RecordingViewModel()
     @StateObject private var webcamPreview = WebcamPreviewSession()
 
     var body: some View {
         ZStack {
-            // Dark studio backdrop.
+            // Studio Console warm-dark backdrop.
             LinearGradient(
-                colors: [Color(white: 0.10), Color(white: 0.06)],
+                colors: [BS.Color.bgTop, BS.Color.bgBottom],
                 startPoint: .top, endPoint: .bottom
             ).ignoresSafeArea()
 
             VStack(spacing: 0) {
                 topBar
-                Divider().opacity(0.2)
+                hairline
                 if let editor = vm.editorState {
                     editorPane(editor)
                 } else {
                     welcomePane
                 }
                 if vm.exportPhase != .none {
-                    Divider().opacity(0.2)
-                    exportBar.padding(12)
+                    hairline
+                    exportBar.padding(BS.Space.snug)
+                        .background(BS.Color.surface)
                 }
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear {
-            vm.webcamPreview = webcamPreview
-        }
+        .onAppear { vm.webcamPreview = webcamPreview }
         .onChange(of: vm.includeWebcam) { newValue in
             Task {
                 if newValue { await webcamPreview.startIfPossible() }
@@ -43,109 +48,76 @@ struct ContentView: View {
     // MARK: - Top bar
 
     private var topBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: BS.Space.snug) {
             if vm.editorState != nil {
-                Button(action: { vm.editorState = nil }) {
-                    Label("Home", systemImage: "house.fill")
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                }
-                .buttonStyle(.plain)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-
-                Divider().frame(height: 22).opacity(0.3)
+                homeButton
+                Divider().frame(height: 18).overlay(BS.Color.divider)
                 exportButton
             } else {
                 Text(vm.phase == .recording ? "Recording…" : "")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.textSecondary)
             }
             Spacer()
             statusBadge
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Color.black.opacity(0.35))
+        .padding(.horizontal, BS.Space.regular)
+        .padding(.vertical, BS.Space.tight + 2)
+        .background(.ultraThinMaterial)
+        .background(BS.Color.surface.opacity(0.6))
     }
 
-    private var recordButton: some View {
-        Button(action: vm.startRecording) {
-            HStack(spacing: 6) {
-                Circle().fill(.red).frame(width: 10, height: 10)
-                Text("Record")
+    private var hairline: some View {
+        Rectangle().fill(BS.Color.hairline).frame(height: 1)
+    }
+
+    private var homeButton: some View {
+        Button(action: { vm.editorState = nil }) {
+            HStack(spacing: BS.Space.tight - 2) {
+                Image(systemName: "house.fill")
+                    .font(.system(size: 11, weight: .medium))
+                Text("Home")
+                    .font(BS.Font.labelStrong)
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
+            .foregroundStyle(BS.Color.textPrimary)
+            .padding(.horizontal, BS.Space.snug)
+            .padding(.vertical, BS.Space.tight - 2)
+            .background(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .fill(BS.Color.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .strokeBorder(BS.Color.hairline, lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
-        .background(canRecord ? Color.white.opacity(0.10) : Color.white.opacity(0.04),
-                    in: RoundedRectangle(cornerRadius: 8))
-        .disabled(!canRecord)
-    }
-
-    private var stopButton: some View {
-        Button(action: vm.stopRecording) {
-            HStack(spacing: 6) {
-                Image(systemName: "stop.fill")
-                Text("Stop")
-            }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-        }
-        .buttonStyle(.plain)
-        .background(vm.phase == .recording ? Color.red.opacity(0.7) : Color.white.opacity(0.04),
-                    in: RoundedRectangle(cornerRadius: 8))
-        .disabled(vm.phase != .recording)
-    }
-
-    private var webcamToggle: some View {
-        HStack(spacing: 12) {
-            Toggle(isOn: $vm.includeWebcam) {
-                Label("Webcam", systemImage: "person.crop.circle.badge.checkmark")
-            }
-            .toggleStyle(.checkbox)
-            .disabled(!canRecord)
-
-            if vm.includeWebcam {
-                webcamPreviewBadge
-                    .frame(width: 44, height: 44)
-            }
-
-            Toggle(isOn: $vm.includeSystemAudio) {
-                Label("System audio", systemImage: "speaker.wave.2")
-            }
-            .toggleStyle(.checkbox)
-            .disabled(!canRecord)
-
-            Toggle(isOn: $vm.includeMic) {
-                Label("Mic", systemImage: "mic.fill")
-            }
-            .toggleStyle(.checkbox)
-            .disabled(!canRecord)
-        }
-    }
-
-    @ViewBuilder
-    private var webcamPreviewBadge: some View {
-        if webcamPreview.permissionDenied {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-        } else if webcamPreview.isRunning {
-            WebcamPreviewView(session: webcamPreview.session, mirrored: true, cornerRadius: 22)
-                .overlay(Circle().stroke(.white.opacity(0.2), lineWidth: 1))
-        } else {
-            ProgressView().controlSize(.small)
-        }
     }
 
     private var exportButton: some View {
         Button(action: vm.polishAndExport) {
-            HStack(spacing: 6) {
+            HStack(spacing: BS.Space.tight - 2) {
                 Image(systemName: "wand.and.stars")
+                    .font(.system(size: 11, weight: .semibold))
                 Text("Export")
+                    .font(BS.Font.labelStrong)
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
+            .foregroundStyle(Color(hex: 0x1A1102))
+            .padding(.horizontal, BS.Space.snug)
+            .padding(.vertical, BS.Space.tight - 2)
+            .background(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [BS.Color.accent, BS.Color.accent.opacity(0.82)],
+                        startPoint: .top, endPoint: .bottom
+                    ))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .strokeBorder(BS.Color.topHighlight, lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
-        .background(Color.accentColor.opacity(0.9), in: RoundedRectangle(cornerRadius: 8))
-        .foregroundStyle(.white)
         .disabled(isExportingNow)
     }
 
@@ -166,27 +138,38 @@ struct ContentView: View {
         case .idle:
             EmptyView()
         case .recording:
-            HStack(spacing: 6) {
-                Circle().fill(.red).frame(width: 8, height: 8)
-                Text("Recording").font(.caption)
-            }.foregroundStyle(.red)
+            HStack(spacing: BS.Space.tight - 2) {
+                Circle().fill(BS.Color.recordingRed)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: BS.Color.recordingGlow, radius: 4)
+                Text("Recording")
+                    .font(BS.Font.labelStrong)
+                    .foregroundStyle(BS.Color.recordingRed)
+            }
         case .finalizing:
-            Text("Finalizing…").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: BS.Space.tight - 2) {
+                ProgressView().controlSize(.small).tint(BS.Color.textSecondary)
+                Text("Finalizing…")
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.textSecondary)
+            }
         case .done:
-            HStack(spacing: 6) {
+            HStack(spacing: BS.Space.tight - 2) {
                 Image(systemName: "checkmark.circle.fill")
-                Text("Ready to edit").font(.caption)
-            }.foregroundStyle(.green)
+                    .foregroundStyle(BS.Color.statusOk)
+                Text("Ready to edit")
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.statusOk)
+            }
         case .failed(let m):
-            HStack(spacing: 8) {
+            HStack(spacing: BS.Space.tight) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text(m).font(.caption).foregroundStyle(.red).lineLimit(3)
+                    .foregroundStyle(BS.Color.statusWarn)
+                Text(m)
+                    .font(BS.Font.caption)
+                    .foregroundStyle(BS.Color.recordingRed)
+                    .lineLimit(2)
                 if m.contains("permission") || m.contains("Privacy") || m.contains("relaunch") {
-                    // Pick the right Privacy pane for the failing subsystem.
-                    // The previous hard-coded `Privacy_ScreenCapture` sent
-                    // users to the wrong place when the failure was actually
-                    // a camera or microphone permission issue.
                     let lower = m.lowercased()
                     let anchor: String = {
                         if lower.contains("camera") || lower.contains("webcam") {
@@ -243,28 +226,33 @@ struct ContentView: View {
     private func editorPane(_ editor: EditorState) -> some View {
         HStack(spacing: 0) {
             RecordingsListView(vm: vm)
-            Divider().opacity(0.2)
+            verticalDivider
 
-            // Center: canvas + scrubber + timeline.
+            // Center column: canvas + scrubber + timeline.
             VStack(spacing: 0) {
                 EngineCanvasView(state: editor)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                Divider().opacity(0.2)
-                VStack(spacing: 8) {
+                hairline
+                VStack(spacing: BS.Space.tight) {
                     ScrubberView(state: editor)
                     TimelineView(state: editor)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, BS.Space.micro)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 12)
-                .background(Color.black.opacity(0.3))
+                .padding(.horizontal, BS.Space.regular)
+                .padding(.vertical, BS.Space.snug)
+                .background(BS.Color.surface.opacity(0.55))
             }
 
-            Divider().opacity(0.2)
+            verticalDivider
 
             InspectorView(state: editor, vm: vm)
-                .frame(width: 280)
-                .background(Color.black.opacity(0.4))
+                .frame(width: 300)
+                .background(BS.Color.surface.opacity(0.65))
         }
+    }
+
+    private var verticalDivider: some View {
+        Rectangle().fill(BS.Color.hairline).frame(width: 1)
     }
 
     @ViewBuilder
@@ -273,24 +261,32 @@ struct ContentView: View {
         case .none:
             EmptyView()
         case .running(let p):
-            HStack(spacing: 12) {
-                ProgressView(value: p).frame(maxWidth: 320)
-                Text("\(Int(p * 100))%").monospacedDigit()
+            HStack(spacing: BS.Space.snug) {
+                ProgressView(value: p)
+                    .tint(BS.Color.accent)
+                    .frame(maxWidth: 320)
+                Text("\(Int(p * 100))%")
+                    .font(BS.Font.mono)
+                    .foregroundStyle(BS.Color.textSecondary)
                 Spacer()
                 Button("Cancel", action: vm.cancelExport)
+                    .controlSize(.small)
             }
         case .completed(let url):
-            HStack {
+            HStack(spacing: BS.Space.tight) {
                 Label("Exported: \(url.lastPathComponent)", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                    .font(BS.Font.label)
+                    .foregroundStyle(BS.Color.statusOk)
                 Spacer()
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([url])
                 }
+                .controlSize(.small)
             }
         case .failed(let msg):
             Label("Export failed: \(msg)", systemImage: "xmark.octagon.fill")
-                .foregroundStyle(.red)
+                .font(BS.Font.label)
+                .foregroundStyle(BS.Color.recordingRed)
         }
     }
 }

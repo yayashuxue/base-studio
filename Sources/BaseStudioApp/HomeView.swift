@@ -3,8 +3,20 @@ import BaseStudioCore
 import BaseStudioRecording
 import SwiftUI
 
-/// Pre-record landing screen. Big webcam preview, capture options, large Record
-/// button, and the recordings library.
+/// Pre-record landing screen.
+///
+/// Studio Console aesthetic — single-column composition centred on a preview
+/// tile of *what will be captured*. Inspired by Cap / Screen Studio: less
+/// pre-flight chrome, more "this is what your recording will look like."
+///
+/// Layout (top → bottom):
+///   1. Title + subtitle (left-aligned, no centred-marketing-page vibe).
+///   2. Preview tile — display aspect-ratio tile with the webcam circle
+///      overlaid in the chosen corner. Mirrors the actual rendered output.
+///   3. Source picker chip — sits just below the tile like a caption.
+///   4. Pill-row of capture toggles — webcam / system audio / mic.
+///   5. Big primary record CTA + keyboard hint.
+///   6. Library summary (subtle).
 struct HomeView: View {
     @ObservedObject var vm: RecordingViewModel
     @ObservedObject var webcamPreview: WebcamPreviewSession
@@ -12,156 +24,217 @@ struct HomeView: View {
     var body: some View {
         HStack(spacing: 0) {
             RecordingsListView(vm: vm)
-            Divider().opacity(0.2)
+            Divider().opacity(0.0) // hairline already provided by RecordingsListView background
 
-            VStack(spacing: 24) {
-                Spacer().frame(height: 4)
-                titleArea
-                webcamPreviewArea
-                optionsRow
-                targetPicker
-                recordCTA
-                Spacer()
-                if vm.library.isEmpty == false {
-                    librarySummary
+            ScrollView {
+                VStack(alignment: .leading, spacing: BS.Space.section) {
+                    titleArea
+                    previewTile
+                    sourceCaption
+                    optionsPills
+                    recordCTA
+                    Spacer(minLength: BS.Space.regular)
+                    if vm.library.isEmpty == false {
+                        librarySummary
+                    }
                 }
-                Spacer().frame(height: 12)
+                .frame(maxWidth: 720, alignment: .leading)
+                .padding(.horizontal, BS.Space.xl)
+                .padding(.top, BS.Space.xl)
+                .padding(.bottom, BS.Space.section)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 32)
         }
     }
 
-    // MARK: - sections
+    // MARK: - Title
 
     private var titleArea: some View {
-        VStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: BS.Space.micro) {
             Text("Base Studio")
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white)
+                .font(BS.Font.display)
+                .foregroundStyle(BS.Color.textPrimary)
             Text("Record your screen, then edit live with auto-zoom, padding, and webcam.")
-                .font(.callout)
-                .foregroundStyle(.white.opacity(0.6))
-                .multilineTextAlignment(.center)
+                .font(BS.Font.label)
+                .foregroundStyle(BS.Color.textSecondary)
         }
+    }
+
+    // MARK: - Preview tile (display aspect-ratio + webcam overlay)
+
+    private var previewTile: some View {
+        // Aspect ratio of the selected display (or sane default 16:9).
+        let aspect = currentAspect
+        return ZStack(alignment: webcamCornerAlignment) {
+            // Tile background — soft graphite gradient, hairline border.
+            RoundedRectangle(cornerRadius: BS.Radius.panel, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [BS.Color.surfaceLit, BS.Color.surfaceRaised],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: BS.Radius.panel, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [BS.Color.topHighlight, .clear],
+                                startPoint: .top, endPoint: .center
+                            ),
+                            lineWidth: 1
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: BS.Radius.panel, style: .continuous)
+                        .strokeBorder(BS.Color.hairline, lineWidth: 1)
+                )
+
+            // Centred display glyph + dims, evoking what will be captured.
+            VStack(spacing: BS.Space.snug) {
+                Image(systemName: targetGlyph)
+                    .font(.system(size: 40, weight: .light))
+                    .foregroundStyle(BS.Color.textTertiary)
+                Text(targetTitle)
+                    .font(BS.Font.labelStrong)
+                    .foregroundStyle(BS.Color.textSecondary)
+                Text(targetSubtitle)
+                    .font(BS.Font.mono)
+                    .foregroundStyle(BS.Color.textTertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // Webcam overlay — a small circle in the corner, like Screen Studio.
+            if vm.includeWebcam {
+                webcamOverlay
+                    .padding(BS.Space.regular)
+            }
+        }
+        .aspectRatio(aspect, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var currentAspect: CGFloat {
+        switch vm.selectedTarget {
+        case .display(let id):
+            if let d = vm.displays.first(where: { $0.id == id }) {
+                return CGFloat(d.widthPx) / CGFloat(d.heightPx)
+            }
+        case .window(let id):
+            if let w = vm.windows.first(where: { $0.id == id }), w.widthPx > 0, w.heightPx > 0 {
+                return CGFloat(w.widthPx) / CGFloat(w.heightPx)
+            }
+        case .none:
+            break
+        }
+        return 16.0 / 9.0
+    }
+
+    private var targetGlyph: String {
+        switch vm.selectedTarget {
+        case .window: return "macwindow"
+        case .display, .none: return "display"
+        }
+    }
+    private var targetTitle: String {
+        switch vm.selectedTarget {
+        case .display(let id):
+            if let d = vm.displays.first(where: { $0.id == id }) {
+                return d.isMain ? "Main Display" : d.label
+            }
+            return "Display"
+        case .window(let id):
+            if let w = vm.windows.first(where: { $0.id == id }) { return w.label }
+            return "Window"
+        case .none: return "Choose source"
+        }
+    }
+    private var targetSubtitle: String {
+        switch vm.selectedTarget {
+        case .display(let id):
+            if let d = vm.displays.first(where: { $0.id == id }) {
+                return "\(d.widthPx) × \(d.heightPx)"
+            }
+        case .window(let id):
+            if let w = vm.windows.first(where: { $0.id == id }) {
+                return "\(w.widthPx) × \(w.heightPx)"
+            }
+        case .none: return "—"
+        }
+        return ""
+    }
+
+    // MARK: - Webcam overlay (lives inside the preview tile)
+
+    private var webcamCornerAlignment: Alignment {
+        // Mirror Screen Studio's default: bottom-right.
+        .bottomTrailing
     }
 
     @ViewBuilder
-    private var webcamPreviewArea: some View {
-        let size: CGFloat = 220
+    private var webcamOverlay: some View {
+        let size: CGFloat = 96
         ZStack {
             Circle()
-                .fill(Color.white.opacity(0.05))
-                .frame(width: size, height: size)
-                .overlay(
-                    Circle().stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .fill(BS.Color.surface)
+                .overlay(Circle().stroke(BS.Color.hairline, lineWidth: 1))
+            if webcamPreview.permissionDenied {
+                webcamDeniedBadge(size: size)
+            } else if webcamPreview.isRunning {
+                WebcamPreviewView(
+                    session: webcamPreview.session, mirrored: true,
+                    cornerRadius: size / 2
                 )
-            if vm.includeWebcam {
-                if webcamPreview.permissionDenied {
-                    VStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.orange)
-                        Text("Camera permission denied")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("Enable in System Settings → Privacy")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        HStack(spacing: 8) {
-                            Button {
-                                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
-                                    NSWorkspace.shared.open(url)
-                                }
-                            } label: {
-                                Text("Open Settings").font(.caption)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            // After granting in Settings the user needs a way
-                            // to clear the latched denial without toggling
-                            // the webcam off/on or relaunching the app.
-                            Button {
-                                Task { await webcamPreview.startIfPossible() }
-                            } label: {
-                                Text("Retry").font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    }
-                } else if webcamPreview.isRunning {
-                    WebcamPreviewView(
-                        session: webcamPreview.session, mirrored: true,
-                        cornerRadius: size / 2
-                    )
-                    .frame(width: size, height: size)
-                } else {
-                    ProgressView().tint(.white)
-                }
+                .overlay(Circle().stroke(BS.Color.topHighlight, lineWidth: 1))
             } else {
-                VStack(spacing: 6) {
-                    Image(systemName: "person.crop.circle.dashed")
-                        .font(.system(size: 56))
-                        .foregroundStyle(.white.opacity(0.35))
-                    Text("Webcam off")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.5))
+                ProgressView().controlSize(.small).tint(BS.Color.textSecondary)
+            }
+        }
+        .frame(width: size, height: size)
+        .shadow(color: .black.opacity(0.45), radius: 14, x: 0, y: 6)
+    }
+
+    @ViewBuilder
+    private func webcamDeniedBadge(size: CGFloat) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(BS.Color.statusWarn)
+            Text("Camera")
+                .font(BS.Font.caption)
+                .foregroundStyle(BS.Color.textSecondary)
+            HStack(spacing: 4) {
+                Button {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Text("Settings")
+                        .font(.system(size: 9, weight: .medium))
                 }
+                .buttonStyle(.borderless)
+                .foregroundStyle(BS.Color.accent)
+
+                Button {
+                    Task { await webcamPreview.startIfPossible() }
+                } label: {
+                    Text("Retry")
+                        .font(.system(size: 9, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(BS.Color.textSecondary)
             }
         }
+        .frame(width: size, height: size)
+        .padding(2)
     }
 
-    private var optionsRow: some View {
-        HStack(spacing: 28) {
-            optionCard(
-                title: "Webcam", systemImage: "person.crop.circle.fill",
-                isOn: $vm.includeWebcam
-            )
-            optionCard(
-                title: "System audio", systemImage: "speaker.wave.2.fill",
-                isOn: $vm.includeSystemAudio
-            )
-            optionCard(
-                title: "Microphone", systemImage: "mic.fill",
-                isOn: $vm.includeMic
-            )
-        }
-    }
+    // MARK: - Source caption (target picker as a chip)
 
-    private func optionCard(title: String, systemImage: String, isOn: Binding<Bool>) -> some View {
-        Button(action: { isOn.wrappedValue.toggle() }) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 20))
-                    .foregroundStyle(isOn.wrappedValue ? Color.accentColor : .white.opacity(0.45))
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(isOn.wrappedValue ? .white : .white.opacity(0.55))
-            }
-            .frame(width: 110, height: 70)
-            .background(
-                isOn.wrappedValue
-                    ? Color.accentColor.opacity(0.18)
-                    : Color.white.opacity(0.05),
-                in: RoundedRectangle(cornerRadius: 10)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(isOn.wrappedValue
-                            ? Color.accentColor.opacity(0.6)
-                            : Color.white.opacity(0.08),
-                            lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var targetPicker: some View {
-        HStack(spacing: 8) {
-            Image(systemName: targetIcon)
-                .foregroundStyle(.white.opacity(0.5))
-                .font(.system(size: 12))
+    private var sourceCaption: some View {
+        HStack(spacing: BS.Space.tight) {
+            Image(systemName: targetGlyph)
+                .font(.system(size: 11))
+                .foregroundStyle(BS.Color.textTertiary)
             Picker("", selection: Binding(
                 get: { targetTagFor(vm.selectedTarget) },
                 set: { tag in vm.selectedTarget = targetFromTag(tag) }
@@ -177,32 +250,28 @@ struct HomeView: View {
                 if !vm.windows.isEmpty {
                     Section("Windows") {
                         ForEach(vm.windows) { w in
-                            Text(w.label)
-                                .tag("w_\(w.id)")
+                            Text(w.label).tag("w_\(w.id)")
                         }
                     }
                 }
             }
             .labelsHidden()
             .pickerStyle(.menu)
-            .frame(width: 320)
+            .controlSize(.small)
+            .tint(BS.Color.textSecondary)
+            .frame(maxWidth: 320)
 
             Button(action: { Task { await vm.refreshDisplays() } }) {
                 Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11))
+                    .foregroundStyle(BS.Color.textSecondary)
             }
             .buttonStyle(.plain)
             .help("Refresh windows")
+            Spacer()
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
-        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var targetIcon: String {
-        switch vm.selectedTarget {
-        case .window: return "macwindow"
-        case .display, .none: return "display"
-        }
-    }
     private func targetTagFor(_ t: CaptureTarget?) -> String {
         switch t {
         case .display(let id): return "d_\(id)"
@@ -216,31 +285,103 @@ struct HomeView: View {
         return nil
     }
 
-    private var recordCTA: some View {
-        Button(action: vm.startRecording) {
-            HStack(spacing: 10) {
-                Circle().fill(Color.red).frame(width: 12, height: 12)
-                Text("Start Recording")
-                    .font(.system(size: 16, weight: .semibold))
-            }
-            .padding(.horizontal, 32).padding(.vertical, 14)
-            .background(
-                LinearGradient(
-                    colors: [Color.accentColor.opacity(0.95), Color.accentColor.opacity(0.7)],
-                    startPoint: .top, endPoint: .bottom
-                ),
-                in: RoundedRectangle(cornerRadius: 12)
+    // MARK: - Capture options as pill row
+
+    private var optionsPills: some View {
+        HStack(spacing: BS.Space.snug) {
+            optionPill(
+                title: "Webcam", systemImage: "person.crop.circle.fill",
+                isOn: $vm.includeWebcam
             )
-            .foregroundStyle(.white)
-            .shadow(color: Color.accentColor.opacity(0.4), radius: 12, y: 4)
+            optionPill(
+                title: "System audio", systemImage: "speaker.wave.2.fill",
+                isOn: $vm.includeSystemAudio
+            )
+            optionPill(
+                title: "Microphone", systemImage: "mic.fill",
+                isOn: $vm.includeMic
+            )
+            Spacer()
         }
-        .buttonStyle(.plain)
-        .keyboardShortcut("r", modifiers: [.command])
     }
 
+    private func optionPill(title: String, systemImage: String, isOn: Binding<Bool>) -> some View {
+        Button(action: { withAnimation(BS.Motion.snap) { isOn.wrappedValue.toggle() } }) {
+            HStack(spacing: BS.Space.tight) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .medium))
+                Text(title)
+                    .font(BS.Font.labelStrong)
+            }
+            .foregroundStyle(isOn.wrappedValue ? BS.Color.textPrimary : BS.Color.textSecondary)
+            .padding(.horizontal, BS.Space.regular)
+            .padding(.vertical, BS.Space.tight + 2)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(isOn.wrappedValue
+                          ? BS.Color.accent.opacity(0.18)
+                          : BS.Color.surface)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        isOn.wrappedValue
+                            ? BS.Color.accent.opacity(0.55)
+                            : BS.Color.hairline,
+                        lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Record CTA
+
+    private var recordCTA: some View {
+        HStack(spacing: BS.Space.regular) {
+            Button(action: vm.startRecording) {
+                HStack(spacing: BS.Space.snug) {
+                    Circle()
+                        .fill(BS.Color.recordingRed)
+                        .frame(width: 10, height: 10)
+                    Text("Start Recording")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .padding(.horizontal, BS.Space.section)
+                .padding(.vertical, BS.Space.snug + 2)
+                .background(
+                    LinearGradient(
+                        colors: [BS.Color.accent, BS.Color.accent.opacity(0.78)],
+                        startPoint: .top, endPoint: .bottom
+                    ),
+                    in: RoundedRectangle(cornerRadius: BS.Radius.card, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: BS.Radius.card, style: .continuous)
+                        .strokeBorder(BS.Color.topHighlight, lineWidth: 1)
+                )
+                .foregroundStyle(Color(hex: 0x1A1102))   // warm near-black for legible text on amber
+                .shadow(color: BS.Color.accent.opacity(0.35), radius: 18, x: 0, y: 6)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("r", modifiers: [.command])
+
+            Text("⌘R")
+                .font(BS.Font.mono)
+                .foregroundStyle(BS.Color.textTertiary)
+        }
+    }
+
+    // MARK: - Library summary
+
     private var librarySummary: some View {
-        Text("\(vm.library.count) recording\(vm.library.count == 1 ? "" : "s") saved · pick from sidebar to edit")
-            .font(.system(size: 11))
-            .foregroundStyle(.white.opacity(0.4))
+        HStack(spacing: BS.Space.tight) {
+            Image(systemName: "tray.full")
+                .font(.system(size: 10))
+                .foregroundStyle(BS.Color.textTertiary)
+            Text("\(vm.library.count) recording\(vm.library.count == 1 ? "" : "s") saved · pick from sidebar to edit")
+                .font(BS.Font.caption)
+                .foregroundStyle(BS.Color.textTertiary)
+        }
     }
 }
