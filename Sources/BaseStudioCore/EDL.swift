@@ -4,6 +4,16 @@ import Foundation
 public typealias NodeID = String     // node-type id, e.g. "zoom"
 public typealias InstanceID = String // node-instance id
 
+/// Stable identifiers for the recorders we know about. Source IDs are
+/// stringly-typed in the EDL on disk (the JSON wire format predates this
+/// enum), so these are namespaced constants — not a typed enum — to keep
+/// the Codable surface unchanged. New recorders should add their id here
+/// rather than littering string literals across recording / preset / render.
+public enum SourceID {
+    public static let screen = "screen"
+    public static let webcam = "webcam"
+}
+
 /// The EDL — single source of truth for "what the video is" (PRD §2).
 public struct Project: Codable, Sendable {
     public var sources: [SourceClip]
@@ -13,6 +23,11 @@ public struct Project: Codable, Sendable {
     public var timelineDuration: TimePoint
     public var zoomRegions: [ZoomRegion]
     public var captions: [Caption]
+    /// Filename of a user-uploaded background image inside the global
+    /// background library (`~/Library/Application Support/BaseStudio/Backgrounds`).
+    /// When set, `BackgroundCompose` paints this image instead of the gradient
+    /// preset. nil = use the gradient preset (`bgTop` / `bgBottom` / `bgStyle`).
+    public var backgroundImageRel: String?
 
     public init(
         sources: [SourceClip],
@@ -21,7 +36,8 @@ public struct Project: Codable, Sendable {
         canvas: CanvasSpec,
         timelineDuration: TimePoint,
         zoomRegions: [ZoomRegion] = [],
-        captions: [Caption] = []
+        captions: [Caption] = [],
+        backgroundImageRel: String? = nil
     ) {
         self.sources = sources
         self.videoTrack = videoTrack
@@ -30,10 +46,11 @@ public struct Project: Codable, Sendable {
         self.timelineDuration = timelineDuration
         self.zoomRegions = zoomRegions
         self.captions = captions
+        self.backgroundImageRel = backgroundImageRel
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sources, videoTrack, nodeGraph, canvas, timelineDuration, zoomRegions, captions
+        case sources, videoTrack, nodeGraph, canvas, timelineDuration, zoomRegions, captions, backgroundImageRel
     }
 
     public init(from decoder: Decoder) throws {
@@ -45,6 +62,15 @@ public struct Project: Codable, Sendable {
         timelineDuration = try c.decode(TimePoint.self, forKey: .timelineDuration)
         zoomRegions = (try? c.decode([ZoomRegion].self, forKey: .zoomRegions)) ?? []
         captions = (try? c.decode([Caption].self, forKey: .captions)) ?? []
+        backgroundImageRel = try? c.decodeIfPresent(String.self, forKey: .backgroundImageRel)
+    }
+
+    /// Sources keyed by `id`. Built fresh on every call (Project is a value
+    /// type — there's no place to memoize). Hot-path callers (per-frame
+    /// renderers) should cache the result and invalidate when `sources`
+    /// changes; one-shot callers (export pipeline setup) can call directly.
+    public var sourcesByID: [String: SourceClip] {
+        Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
     }
 
     /// Build a `TimeMap` from this project's primary segment (trim) and zoom regions
@@ -88,6 +114,23 @@ public struct SourceClip: Codable, Sendable {
         self.heightPx = heightPx
         self.firstPTS = firstPTS
         self.sidecars = sidecars
+    }
+
+    /// Convert a host-clock PTS to this source's on-disk file time.
+    ///
+    /// `AVAssetWriter.startSession(atSourceTime:)` shifts each recorded source's
+    /// track so that file-time begins at zero (regardless of which host-clock
+    /// instant the recorder actually started at). This means seeks against
+    /// `AVAssetImageGenerator` / `AVAssetReader.timeRange` must use file-time,
+    /// not host-time. Use this helper anywhere a host-clock PTS is being
+    /// converted into a seek target for this clip's `.mov`.
+    ///
+    /// Result is clamped to ≥ 0 — host PTSes earlier than this source's first
+    /// frame have no corresponding file-time.
+    public func fileTime(at hostPTS: CMTime) -> CMTime {
+        let delta = CMTimeSubtract(hostPTS, firstPTS.cmTime)
+        if CMTimeCompare(delta, .zero) < 0 { return .zero }
+        return delta
     }
 }
 

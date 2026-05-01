@@ -16,6 +16,7 @@ public enum Renderer {
         public let sidecars: SidecarStreams
         public let quality: QualityTier
         public let ciContext: CIContext
+        public let backgroundImage: CIImage?
         public let frameProvider: (String, CMTime) -> CIImage?
 
         public init(
@@ -27,6 +28,7 @@ public enum Renderer {
             sidecars: SidecarStreams,
             quality: QualityTier,
             ciContext: CIContext,
+            backgroundImage: CIImage? = nil,
             frameProvider: @escaping (String, CMTime) -> CIImage?
         ) {
             self.project = project
@@ -37,6 +39,7 @@ public enum Renderer {
             self.sidecars = sidecars
             self.quality = quality
             self.ciContext = ciContext
+            self.backgroundImage = backgroundImage
             self.frameProvider = frameProvider
         }
     }
@@ -52,6 +55,7 @@ public enum Renderer {
             primarySource: inputs.primarySource,
             ciContext: inputs.ciContext,
             captionTextForFrame: captionText,
+            backgroundImage: inputs.backgroundImage,
             frameProvider: inputs.frameProvider
         )
 

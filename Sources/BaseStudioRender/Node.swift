@@ -47,6 +47,11 @@ public final class RenderCtx {
     public let primarySource: SourceClip     // the screen capture clip for now
     public let ciContext: CIContext
     public let captionTextForFrame: String?
+    /// Pre-loaded CIImage for `Project.backgroundImageRel`. nil = use the
+    /// gradient preset. Lifted into `RenderCtx` so the render pass doesn't
+    /// hit disk per frame; `EditorState` / `ExportPipeline` are responsible
+    /// for caching the load.
+    public let backgroundImage: CIImage?
     private let frameProvider: (String, CMTime) -> CIImage?
 
     public init(
@@ -56,6 +61,7 @@ public final class RenderCtx {
         primarySource: SourceClip,
         ciContext: CIContext,
         captionTextForFrame: String? = nil,
+        backgroundImage: CIImage? = nil,
         frameProvider: @escaping (String, CMTime) -> CIImage?
     ) {
         self.pts = pts
@@ -64,6 +70,7 @@ public final class RenderCtx {
         self.primarySource = primarySource
         self.ciContext = ciContext
         self.captionTextForFrame = captionTextForFrame
+        self.backgroundImage = backgroundImage
         self.frameProvider = frameProvider
     }
 

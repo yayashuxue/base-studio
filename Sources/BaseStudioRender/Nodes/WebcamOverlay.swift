@@ -24,8 +24,7 @@ public struct WebcamOverlay: VideoNode {
 
     public func apply(input: CIImage, params: ParamValues, ctx: RenderCtx) -> CIImage {
         guard params["visible"]?.asBool ?? true else { return input }
-        // Webcam source id convention: stored as a separate SourceClip with id "webcam".
-        guard let webcam = ctx.sourceFrame("webcam", at: ctx.pts) else { return input }
+        guard let webcam = ctx.sourceFrame(SourceID.webcam, at: ctx.pts) else { return input }
 
         let size = CGFloat(params["sizePx"]?.asScalar ?? 220)
         let margin = CGFloat(params["marginPx"]?.asScalar ?? 48)

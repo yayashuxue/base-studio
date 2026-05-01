@@ -51,7 +51,7 @@ public final class ExportPipeline {
 
     public func run(_ input: Input) async throws -> URL {
         // 1. Resolve primary source.
-        guard let primary = input.project.sources.first(where: { $0.id == "screen" })
+        guard let primary = input.project.sources.first(where: { $0.id == SourceID.screen })
                 ?? input.project.sources.first
         else { throw ExportError.primarySourceMissing }
         let primaryURL = input.bundleURL.appendingPathComponent(primary.relativeMediaPath)
@@ -157,29 +157,34 @@ public final class ExportPipeline {
             .useSoftwareRenderer: false,
         ])
 
-        // 6. Iterate primary frames; map source PTS → timeline PTS by subtracting first PTS.
-        let originPTS = primary.firstPTS.cmTime
+        // 6. Iterate primary frames; reader.pts is file-time.
+        let originPTS = primary.firstPTS.cmTime   // host-clock anchor of primary's first frame
         let totalDur = input.project.timelineDuration.cmTime.seconds
 
-        // Cache the *current* primary frame's CIImage and timeline pts so
-        // frameProvider can serve it without re-reading.
+        let backgroundImage: CIImage? = input.project.backgroundImageRel
+            .flatMap { BackgroundImageStore.loadCIImage(filename: $0) }
+
+        // File-time conversion: AVAssetWriter shifts each source's track to
+        // start at 0, so seeks must use SourceClip.fileTime(at:).
+        let sourcesByID = input.project.sourcesByID
+
         var currentTimelinePTS = CMTime.zero
 
         let frameProvider: (String, CMTime) -> CIImage? = { [weak self] sourceID, _ in
-            guard let self else { return nil }
-            // Multi-source frame fetch (e.g. webcam). Adds host-clock origin back.
-            guard let r = randomReaders[sourceID] else { return nil }
-            // Use a synchronous wait via DispatchSemaphore — render loop is single-threaded.
-            let target = CMTimeAdd(currentTimelinePTS, originPTS)
-            return self.syncFetch(r, at: target)
+            guard let self,
+                  let r = randomReaders[sourceID],
+                  let src = sourcesByID[sourceID] else { return nil }
+            let hostTarget = CMTimeAdd(currentTimelinePTS, originPTS)
+            return self.syncFetch(r, at: src.fileTime(at: hostTarget))
         }
 
-        // Trim handling: the segment's sourceIn defines timeline-0; frames before
-        // that are skipped. sidecarOffset = sourceIn - firstPTS so cursor/clicks
-        // line up with the trimmed video.
+        // Trim window: reader.pts is file-time, so compare in file-time.
+        // sidecarOffset stays in host-time (sidecar streams use host PTS).
         let segIn = input.project.videoTrack.segments.first?.sourceIn.cmTime ?? originPTS
         let segOut = input.project.videoTrack.segments.first?.sourceOut.cmTime
             ?? CMTimeAdd(originPTS, input.project.timelineDuration.cmTime)
+        let segInFileTime = primary.fileTime(at: segIn)
+        let segOutFileTime = primary.fileTime(at: segOut)
         let sidecarOffset = CMTimeSubtract(segIn, originPTS)
 
         // Compute the time map honoring speed-bearing regions.
@@ -190,12 +195,12 @@ public final class ExportPipeline {
         var frameCount = 0
 
         if !hasSpeedRemap {
-            // Fast path: sequential read of source frames; output PTS = timelinePTS = source - segIn.
+            // Fast path: sequential read of source frames; reader.pts is file-time.
             while let frame = primaryReader.nextFrame() {
                 if isCanceled { throw ExportError.canceled }
-                if CMTimeCompare(frame.pts, segIn) < 0 { continue }
-                if CMTimeCompare(frame.pts, segOut) > 0 { break }
-                let timelinePTS = CMTimeSubtract(frame.pts, segIn)
+                if CMTimeCompare(frame.pts, segInFileTime) < 0 { continue }
+                if CMTimeCompare(frame.pts, segOutFileTime) > 0 { break }
+                let timelinePTS = CMTimeSubtract(frame.pts, segInFileTime)
                 currentTimelinePTS = timelinePTS
 
                 while !videoInput.isReadyForMoreMediaData {
@@ -207,7 +212,9 @@ public final class ExportPipeline {
                     sidecars: sidecars, ciContext: ciContext,
                     canvasW: canvasW, canvasH: canvasH,
                     outW: outW, outH: outH,
-                    adaptor: adaptor, frameProvider: frameProvider
+                    adaptor: adaptor,
+                    backgroundImage: backgroundImage,
+                    frameProvider: frameProvider
                 )
                 frameCount += 1
                 if frameCount % 5 == 0, timelineDurationSec > 0 {
@@ -229,10 +236,13 @@ public final class ExportPipeline {
                 if isCanceled { throw ExportError.canceled }
                 let timelineSec = Double(i) * frameStep
                 let timelinePTS = CMTime(seconds: timelineSec, preferredTimescale: 600)
-                let sourcePTS = timeMap.sourcePTS(at: timelineSec, firstPTS: originPTS)
+                let sourceHostPTS = timeMap.sourcePTS(at: timelineSec, firstPTS: originPTS)
+                // imageGen reads from screen.mov whose track was shifted to
+                // file-time 0 by AVAssetWriter — convert host-PTS → file-time.
+                let sourceFileTime = primary.fileTime(at: sourceHostPTS)
                 currentTimelinePTS = timelinePTS
 
-                guard let cg = try? imageGen.copyCGImage(at: sourcePTS, actualTime: nil) else {
+                guard let cg = try? imageGen.copyCGImage(at: sourceFileTime, actualTime: nil) else {
                     continue
                 }
                 let primaryFrame = CIImage(cgImage: cg)
@@ -246,7 +256,9 @@ public final class ExportPipeline {
                     sidecars: sidecars, ciContext: ciContext,
                     canvasW: canvasW, canvasH: canvasH,
                     outW: outW, outH: outH,
-                    adaptor: adaptor, frameProvider: frameProvider
+                    adaptor: adaptor,
+                    backgroundImage: backgroundImage,
+                    frameProvider: frameProvider
                 )
                 frameCount += 1
                 if frameCount % 10 == 0, timelineDurationSec > 0 {
@@ -257,8 +269,8 @@ public final class ExportPipeline {
 
         videoInput.markAsFinished()
 
-        // Audio mix: combine system audio (from screen.mov) and mic.m4a per the
-        // chosen audioMode. Trim offset applied so audio aligns with trimmed video.
+        // Audio mix: AudioMixer.Source.originPTS is in *file-time* (not host).
+        // Each source has its own first-frame anchor — convert per-source.
         if audioInputAdded && input.audioMode != .mute {
             let micURL = input.bundleURL.appendingPathComponent("mic.m4a")
             let hasMic = FileManager.default.fileExists(atPath: micURL.path)
@@ -268,10 +280,15 @@ public final class ExportPipeline {
             let useSystem = (input.audioMode == .both || input.audioMode == .systemOnly) && hasSystemAudio
             let useMic = (input.audioMode == .both || input.audioMode == .micOnly) && hasMic
             if useSystem {
-                sources.append(.init(url: primaryURL, originPTS: segIn, gain: 0.85))
+                sources.append(.init(url: primaryURL, originPTS: segInFileTime, gain: 0.85))
             }
             if useMic {
-                sources.append(.init(url: micURL, originPTS: segIn, gain: 1.0))
+                // Legacy bundles (pre-`micFirstPTS`) assumed mic shared the
+                // screen anchor. micOrigin may be negative (mic started after
+                // segIn) — the mixer treats that as silence until -origin.
+                let micHostFirstPTS = meta.micFirstPTS?.cmTime ?? originPTS
+                let micOrigin = CMTimeSubtract(segIn, micHostFirstPTS)
+                sources.append(.init(url: micURL, originPTS: micOrigin, gain: 1.0))
             }
 
             do {
@@ -283,7 +300,7 @@ public final class ExportPipeline {
                     canceled: { [weak self] in self?.isCanceled ?? false }
                 )
             } catch {
-                NSLog("BaseStudio: audio mix failed (\(error)); finishing video-only export.")
+                BSLog.error("audio mix failed (\(error)); finishing video-only export.")
             }
             audioInput.markAsFinished()
         }
@@ -304,6 +321,7 @@ public final class ExportPipeline {
         ciContext: CIContext, canvasW: Int, canvasH: Int,
         outW: Int, outH: Int,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
+        backgroundImage: CIImage?,
         frameProvider: @escaping (String, CMTime) -> CIImage?
     ) throws {
         let inputs = Renderer.Inputs(
@@ -311,7 +329,9 @@ public final class ExportPipeline {
             sidecarOffset: sidecarOffset,
             primarySource: primary, primaryFrame: primaryFrame,
             sidecars: sidecars, quality: .high,
-            ciContext: ciContext, frameProvider: frameProvider
+            ciContext: ciContext,
+            backgroundImage: backgroundImage,
+            frameProvider: frameProvider
         )
         var output = Renderer.render(inputs)
         // Scale to target output dimensions if different from canvas (resolution preset).

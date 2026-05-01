@@ -48,15 +48,23 @@ public struct BackgroundCompose: VideoNode {
         let canvasH = CGFloat(ctx.canvas.heightPx)
         let canvasRect = CGRect(x: 0, y: 0, width: canvasW, height: canvasH)
 
-        // 1. Background gradient (style: linear / radial / diagonal mesh).
-        let style = Int(params["bgStyle"]?.asScalar ?? 0)
-        let topC = params["bgTop"]?.asColor ?? (0.13, 0.18, 0.32, 1)
-        let botC = params["bgBottom"]?.asColor ?? (0.05, 0.06, 0.10, 1)
+        // 1. Background — user-uploaded image takes priority over the gradient
+        // preset. EditorState / ExportPipeline pre-load the CIImage so we
+        // never touch disk per frame; here we just fit-cover it into the
+        // canvas (fills the whole rect, crops aspect overflow). Falls
+        // through to the gradient if no image is set or the file is missing.
         let bg: CIImage
-        switch style {
-        case 1: bg = radialGradient(top: topC, bottom: botC, in: canvasRect)
-        case 2: bg = diagonalMesh(top: topC, bottom: botC, in: canvasRect)
-        default: bg = gradient(top: topC, bottom: botC, in: canvasRect)
+        if let img = ctx.backgroundImage {
+            bg = fitCover(img, into: canvasRect)
+        } else {
+            let style = Int(params["bgStyle"]?.asScalar ?? 0)
+            let topC = params["bgTop"]?.asColor ?? (0.13, 0.18, 0.32, 1)
+            let botC = params["bgBottom"]?.asColor ?? (0.05, 0.06, 0.10, 1)
+            switch style {
+            case 1: bg = radialGradient(top: topC, bottom: botC, in: canvasRect)
+            case 2: bg = diagonalMesh(top: topC, bottom: botC, in: canvasRect)
+            default: bg = gradient(top: topC, bottom: botC, in: canvasRect)
+            }
         }
 
         // 2. Fit input into (canvas - 2*padding) preserving aspect.
@@ -177,6 +185,22 @@ public struct BackgroundCompose: VideoNode {
         cache.mask = m
         cache.lock.unlock()
         return m
+    }
+
+    /// Scale `img` to fully cover `rect` (largest dimension wins), centered.
+    /// Equivalent to CSS `background-size: cover`. Crops aspect overflow.
+    private func fitCover(_ img: CIImage, into rect: CGRect) -> CIImage {
+        let e = img.extent
+        guard e.width > 0, e.height > 0 else { return CIImage(color: .black).cropped(to: rect) }
+        let scale = max(rect.width / e.width, rect.height / e.height)
+        let placedW = e.width * scale
+        let placedH = e.height * scale
+        let dx = rect.midX - placedW / 2 - e.minX * scale
+        let dy = rect.midY - placedH / 2 - e.minY * scale
+        let t = CGAffineTransform.identity
+            .translatedBy(x: dx, y: dy)
+            .scaledBy(x: scale, y: scale)
+        return img.transformed(by: t).cropped(to: rect)
     }
 
     private func roundedRectMask(rect: CGRect, radius: CGFloat, canvas: CGRect) -> CIImage {

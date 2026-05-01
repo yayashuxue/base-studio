@@ -17,7 +17,14 @@ public enum AudioMixer {
 
     public struct Source {
         public let url: URL
-        public let originPTS: CMTime    // host-clock anchor; subtracted from sample PTS to land on timeline-zero
+        /// File-time origin: subtracted from the reader's sample PTS (also
+        /// file-time, since AVAssetWriter shifted each .mov's track to start
+        /// at 0) to land on timeline-zero. NOT a host-clock value — passing
+        /// host-time here gives a negative timelinePTS and the mixer drops
+        /// every sample as out-of-range. Callers convert host-time anchors
+        /// (segment trim points) via `SourceClip.fileTime(at:)` before
+        /// constructing this.
+        public let originPTS: CMTime
         public let gain: Float          // 0..1
         public init(url: URL, originPTS: CMTime, gain: Float = 1.0) {
             self.url = url
@@ -264,8 +271,15 @@ public enum AudioMixer {
             var mix = [Float](repeating: 0, count: outFrames * channelCount)
 
             for src in sources {
-                let srcStart = src.originPTS.seconds + timeMap.trimInSec + tlSeg.sourceStart
-                let srcEnd = src.originPTS.seconds + timeMap.trimInSec + tlSeg.sourceEnd
+                // `originPTS` is the file-time of timeline-zero for this source
+                // (per the type's contract). `tlSeg.sourceStart` / `sourceEnd`
+                // are timeline-relative (seconds since trim-in). Their sum is
+                // the file-time range to read from this source's .mov.
+                // (The old code added `timeMap.trimInSec` here too, which only
+                // worked when callers passed host-time as originPTS — see the
+                // ExportPipeline audio-mix block for the corresponding fix.)
+                let srcStart = src.originPTS.seconds + tlSeg.sourceStart
+                let srcEnd = src.originPTS.seconds + tlSeg.sourceEnd
                 let pcm = try await readPCM(
                     url: src.url,
                     sourceStartSec: srcStart, sourceEndSec: srcEnd,

@@ -12,7 +12,20 @@ import SwiftUI
 @MainActor
 final class EditorState: ObservableObject {
 
-    @Published var project: Project
+    @Published var project: Project {
+        didSet {
+            cachedTimeMap = nil
+            cachedSourcesByID = nil
+            // Reload disk-backed bg only when filename changes — otherwise
+            // playhead scrubbing keeps re-decoding the PNG.
+            if oldValue.backgroundImageRel != project.backgroundImageRel {
+                loadBackgroundImage()
+            }
+        }
+    }
+    /// CIImage for `project.backgroundImageRel`, lazily loaded and reused
+    /// across frames. nil when no upload is set or the file is missing.
+    private var backgroundImageCache: CIImage?
     @Published var playheadSec: Double = 0
     @Published var isPlaying: Bool = false
     @Published var renderedImage: NSImage?
@@ -30,7 +43,17 @@ final class EditorState: ObservableObject {
 
     private var generators: [String: AVAssetImageGenerator] = [:]
     private var cachedFrame: (sourceID: String, pts: CMTime, image: CIImage)?
-    private var renderTask: Task<Void, Never>?
+    // Per-project caches; invalidated by `project.didSet`. Read on the
+    // per-frame render hot path.
+    private var cachedTimeMap: TimeMap?
+    private var cachedSourcesByID: [String: SourceClip]?
+    /// We intentionally do NOT cancel a running render mid-flight:
+    /// AVAssetImageGenerator decode work doesn't honour Task cancellation,
+    /// so cancel-and-restart at 30fps throws away nearly-finished frames
+    /// and starves playback. `scheduleRender` while busy flips
+    /// `renderPending` and the running render re-schedules itself.
+    private var renderInFlight = false
+    private var renderPending = false
     private var playTimer: Timer?
     private var saveDebounce: Timer?
 
@@ -64,8 +87,13 @@ final class EditorState: ObservableObject {
             let asset = AVURLAsset(url: url)
             let gen = AVAssetImageGenerator(asset: asset)
             gen.appliesPreferredTrackTransform = true
-            gen.requestedTimeToleranceBefore = .positiveInfinity
-            gen.requestedTimeToleranceAfter = .positiveInfinity
+            // ~33ms (one frame @ 30fps). Tight enough to catch host/file-time
+            // mismatches (host-PTS ~10^6s is far outside any tolerance);
+            // loose enough that playback doesn't reseek every 16ms.
+            // NEVER set to `.positiveInfinity` — it silently clamps to the
+            // last frame on mismatch and masks bugs (see camera-replay #2).
+            gen.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 30)
+            gen.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 30)
             generators[src.id] = gen
         }
 
@@ -78,6 +106,42 @@ final class EditorState: ObservableObject {
                 await MainActor.run { [weak self] in self?.waveform = samples }
             }
         }
+
+        loadBackgroundImage()
+    }
+
+    private func loadBackgroundImage() {
+        guard let name = project.backgroundImageRel else {
+            backgroundImageCache = nil
+            return
+        }
+        backgroundImageCache = BackgroundImageStore.loadCIImage(filename: name)
+    }
+
+    /// Import a user-picked image into the global background library and
+    /// point this project at it. The original file is left untouched.
+    func uploadBackgroundImage(from sourceURL: URL) throws {
+        let stored = try BackgroundImageStore.importFile(sourceURL)
+        pushUndoSnapshot()
+        project.backgroundImageRel = stored
+        scheduleAutoSave()
+    }
+
+    /// Clear the upload — `BackgroundCompose` falls back to the gradient preset.
+    func clearBackgroundImage() {
+        guard project.backgroundImageRel != nil else { return }
+        pushUndoSnapshot()
+        project.backgroundImageRel = nil
+        scheduleAutoSave()
+    }
+
+    /// Switch to an already-uploaded image in the global library by name.
+    /// Use `clearBackgroundImage()` to fall back to the gradient preset.
+    func selectBackgroundImage(_ name: String) {
+        guard project.backgroundImageRel != name else { return }
+        pushUndoSnapshot()
+        project.backgroundImageRel = name
+        scheduleAutoSave()
     }
 
     // MARK: - region editing
@@ -169,7 +233,17 @@ final class EditorState: ObservableObject {
     }
 
     var timeMap: TimeMap {
-        project.timeMap(primaryFirstPTS: primarySource.firstPTS.cmTime)
+        if let cached = cachedTimeMap { return cached }
+        let map = project.timeMap(primaryFirstPTS: primarySource.firstPTS.cmTime)
+        cachedTimeMap = map
+        return map
+    }
+
+    private var sourcesByID: [String: SourceClip] {
+        if let cached = cachedSourcesByID { return cached }
+        let map = project.sourcesByID
+        cachedSourcesByID = map
+        return map
     }
 
     var timelineDurationSec: Double {
@@ -220,11 +294,11 @@ final class EditorState: ObservableObject {
 
     var trimInSec: Double {
         guard let seg = project.videoTrack.segments.first else { return 0 }
-        return max(0, CMTimeGetSeconds(CMTimeSubtract(seg.sourceIn.cmTime, primarySource.firstPTS.cmTime)))
+        return primarySource.fileTime(at: seg.sourceIn.cmTime).seconds
     }
     var trimOutSec: Double {
         guard let seg = project.videoTrack.segments.first else { return 0 }
-        return max(0, CMTimeGetSeconds(CMTimeSubtract(seg.sourceOut.cmTime, primarySource.firstPTS.cmTime)))
+        return primarySource.fileTime(at: seg.sourceOut.cmTime).seconds
     }
     var sourceFullDurationSec: Double {
         let s = CMTimeSubtract(recordingMeta.lastVideoPTS.cmTime, recordingMeta.firstVideoPTS.cmTime)
@@ -294,7 +368,11 @@ final class EditorState: ObservableObject {
         guard !isPlaying else { return }
         isPlaying = true
         playTimer?.invalidate()
-        let interval: TimeInterval = 1.0 / 30.0
+        // 24fps for editor preview: per-frame HEVC decode + pipeline still
+        // routinely exceeds 33ms on 4K screen recordings, and a 30fps timer
+        // just queues up renders the playback can't catch. Export still
+        // runs at 60fps; this is a UI-only knob.
+        let interval: TimeInterval = 1.0 / 24.0
         playTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -317,15 +395,29 @@ final class EditorState: ObservableObject {
     // MARK: - rendering
 
     func scheduleRender() {
-        renderTask?.cancel()
         renderFailureMessage = nil
+        if renderInFlight {
+            renderPending = true
+            return
+        }
+        runRender()
+    }
+
+    private func runRender() {
+        renderInFlight = true
+        renderPending = false
         let snapshot = project
         let pts = playheadPTS
-        renderTask = Task { [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             let image = await self.render(project: snapshot, at: pts)
-            if Task.isCancelled { return }
-            await MainActor.run { self.renderedImage = image }
+            await MainActor.run {
+                self.renderedImage = image
+                self.renderInFlight = false
+                if self.renderPending {
+                    self.runRender()
+                }
+            }
         }
     }
 
@@ -337,12 +429,11 @@ final class EditorState: ObservableObject {
         guard let primaryImg = await sourceFrameAsync(primarySource.id, timelinePTS: pts) else {
             return nil
         }
-        // Trim offset: timeline 0 maps to segment.sourceIn in source time. Sidecars
-        // are normalized to first-frame PTS, so the sidecar lookup time at timeline
-        // pts is `pts + (sourceIn - firstPTS)`.
-        let firstPTS = primarySource.firstPTS.cmTime
-        let segIn = project.videoTrack.segments.first?.sourceIn.cmTime ?? firstPTS
-        let sidecarOffset = CMTimeSubtract(segIn, firstPTS)
+        // sidecarOffset = trim shift; sidecars are normalized to first-frame PTS so
+        // the lookup at timeline pts is `pts + fileTime(segIn)`.
+        let segIn = project.videoTrack.segments.first?.sourceIn.cmTime
+            ?? primarySource.firstPTS.cmTime
+        let sidecarOffset = primarySource.fileTime(at: segIn)
 
         let inputs = Renderer.Inputs(
             project: project,
@@ -353,6 +444,7 @@ final class EditorState: ObservableObject {
             sidecars: sidecars,
             quality: .high,
             ciContext: ciContext,
+            backgroundImage: backgroundImageCache,
             frameProvider: { [weak self] sourceID, t in
                 guard let self else { return nil }
                 return self.syncSourceFrame(sourceID, timelinePTS: t)
@@ -369,41 +461,47 @@ final class EditorState: ObservableObject {
 
     // MARK: - frame fetch
 
-    private func sourceFrameAsync(_ sourceID: String, timelinePTS: CMTime) async -> CIImage? {
-        let sourcePTS: CMTime
-        if sourceID == primarySource.id {
-            sourcePTS = primarySourcePTS(at: timelinePTS)
-        } else {
-            sourcePTS = CMTimeAdd(timelinePTS, sourceOrigin(sourceID))
-        }
+    /// Resolve the on-disk file-time at which to seek `source` for a given
+    /// timeline PTS. Primary honors trim + speed-ramps; secondary sources
+    /// (e.g. webcam) share the host clock and only get the host→file shift.
+    private func seekTime(forSource source: SourceClip, timelinePTS: CMTime) -> CMTime {
+        let hostPTS = source.id == primarySource.id
+            ? primarySourcePTS(at: timelinePTS)
+            : CMTimeAdd(primarySource.firstPTS.cmTime, timelinePTS)
+        return source.fileTime(at: hostPTS)
+    }
+
+    /// Resolve the seek target for `sourceID` and return a cache hit if we
+    /// already have its frame. nil = unknown source/generator (caller bails).
+    private func resolveSeek(_ sourceID: String, timelinePTS: CMTime)
+        -> (seekTime: CMTime, gen: AVAssetImageGenerator, cached: CIImage?)?
+    {
+        guard let src = sourcesByID[sourceID],
+              let gen = generators[sourceID] else { return nil }
+        let seekTime = seekTime(forSource: src, timelinePTS: timelinePTS)
         if let cached = cachedFrame,
            cached.sourceID == sourceID,
-           abs(CMTimeGetSeconds(CMTimeSubtract(cached.pts, sourcePTS))) < 1.0 / 60.0 {
-            return cached.image
+           abs(CMTimeGetSeconds(CMTimeSubtract(cached.pts, seekTime))) < 1.0 / 60.0 {
+            return (seekTime, gen, cached.image)
         }
-        guard let gen = generators[sourceID] else { return nil }
+        return (seekTime, gen, nil)
+    }
+
+    private func sourceFrameAsync(_ sourceID: String, timelinePTS: CMTime) async -> CIImage? {
+        guard let r = resolveSeek(sourceID, timelinePTS: timelinePTS) else { return nil }
+        if let hit = r.cached { return hit }
         do {
-            let result = try await gen.image(at: sourcePTS)
+            let result = try await r.gen.image(at: r.seekTime)
             let img = CIImage(cgImage: result.image)
-            cachedFrame = (sourceID, sourcePTS, img)
+            cachedFrame = (sourceID, r.seekTime, img)
             return img
         } catch {
-            NSLog("BaseStudio: image gen failed for \(sourceID) at pts=\(sourcePTS.seconds): \(error.localizedDescription)")
+            BSLog.error("image gen failed for \(sourceID) at fileTime=\(r.seekTime.seconds): \(error.localizedDescription)")
             await MainActor.run { [weak self] in
                 self?.renderFailureMessage = "Couldn't read frame from \(sourceID).mov — recording may be corrupt. \(error.localizedDescription)"
             }
             return nil
         }
-    }
-
-    private func sourceOrigin(_ sourceID: String) -> CMTime {
-        // For the primary source, honor the segment's trim sourceIn.
-        if sourceID == primarySource.id,
-           let seg = project.videoTrack.segments.first {
-            return seg.sourceIn.cmTime
-        }
-        // Other sources (webcam) keep the original first-frame PTS.
-        return primarySource.firstPTS.cmTime
     }
 
     /// Source PTS for the primary clip at a given timeline t — honors speed-ramp slices.
@@ -417,23 +515,13 @@ final class EditorState: ObservableObject {
 
     // Synchronous wrapper for the renderer's frameProvider closure (which is sync).
     private func syncSourceFrame(_ sourceID: String, timelinePTS: CMTime) -> CIImage? {
-        let sourcePTS: CMTime
-        if sourceID == primarySource.id {
-            sourcePTS = primarySourcePTS(at: timelinePTS)
-        } else {
-            sourcePTS = CMTimeAdd(timelinePTS, sourceOrigin(sourceID))
-        }
-        if let cached = cachedFrame,
-           cached.sourceID == sourceID,
-           abs(CMTimeGetSeconds(CMTimeSubtract(cached.pts, sourcePTS))) < 1.0 / 60.0 {
-            return cached.image
-        }
-        guard let gen = generators[sourceID] else { return nil }
+        guard let r = resolveSeek(sourceID, timelinePTS: timelinePTS) else { return nil }
+        if let hit = r.cached { return hit }
         do {
             var actualTime = CMTime.zero
-            let cg = try gen.copyCGImage(at: sourcePTS, actualTime: &actualTime)
+            let cg = try r.gen.copyCGImage(at: r.seekTime, actualTime: &actualTime)
             let img = CIImage(cgImage: cg)
-            cachedFrame = (sourceID, sourcePTS, img)
+            cachedFrame = (sourceID, r.seekTime, img)
             return img
         } catch {
             return nil
@@ -455,7 +543,7 @@ extension EditorState {
             project = try PolishPreset.makeProject(bundle: bundle)
             try ProjectIO.save(project, to: bundle)
         }
-        guard let primary = project.sources.first(where: { $0.id == "screen" })
+        guard let primary = project.sources.first(where: { $0.id == SourceID.screen })
                 ?? project.sources.first
         else { throw EditorLoadError.noPrimary }
 
