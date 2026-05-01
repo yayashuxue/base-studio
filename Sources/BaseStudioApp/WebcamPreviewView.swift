@@ -18,6 +18,12 @@ final class WebcamPreviewSession: ObservableObject {
 
     func startIfPossible() async {
         guard !isRunning else { return }
+        // Re-check OS state on every attempt — never trust a prior denial.
+        // `permissionDenied` is `@Published`, so without this reset a single
+        // transient denial would stick in the UI forever (the user grants
+        // access in System Settings, but our flag is still `true`).
+        permissionDenied = false
+
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         if status == .denied || status == .restricted {
             permissionDenied = true
@@ -31,14 +37,24 @@ final class WebcamPreviewSession: ObservableObject {
             configure()
             configured = true
         }
-        await Task.detached { [session] in session.startRunning() }.value
-        isRunning = true
+        let captureSession = session
+        await Task.detached { captureSession.startRunning() }.value
+        // `startRunning()` is silent on failure (e.g. permission revoked
+        // between the status check and now). Verify, and surface the failure
+        // as a denial so the UI can show its recovery affordance.
+        if captureSession.isRunning {
+            isRunning = true
+        } else {
+            permissionDenied = true
+        }
     }
 
     func stop() {
         guard isRunning else { return }
         session.stopRunning()
         isRunning = false
+        // Clear any latched denial so the next start re-checks fresh.
+        permissionDenied = false
     }
 
     private func configure() {

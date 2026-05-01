@@ -1,3 +1,4 @@
+import AppKit
 import BaseStudioCore
 import BaseStudioRecording
 import SwiftUI
@@ -57,7 +58,7 @@ struct HomeView: View {
                 )
             if vm.includeWebcam {
                 if webcamPreview.permissionDenied {
-                    VStack(spacing: 6) {
+                    VStack(spacing: 10) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 28))
                             .foregroundStyle(.orange)
@@ -67,6 +68,27 @@ struct HomeView: View {
                         Text("Enable in System Settings → Privacy")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                        HStack(spacing: 8) {
+                            Button {
+                                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            } label: {
+                                Text("Open Settings").font(.caption)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            // After granting in Settings the user needs a way
+                            // to clear the latched denial without toggling
+                            // the webcam off/on or relaunching the app.
+                            Button {
+                                Task { await webcamPreview.startIfPossible() }
+                            } label: {
+                                Text("Retry").font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
                     }
                 } else if webcamPreview.isRunning {
                     WebcamPreviewView(

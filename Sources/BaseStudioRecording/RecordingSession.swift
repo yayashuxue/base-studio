@@ -1,6 +1,21 @@
 import BaseStudioCore
 import Foundation
 
+/// Errors thrown by `RecordingSession` itself. Recorder-level errors keep
+/// their own types (e.g. `WebcamRecorderError`); these are re-throws or
+/// composite failures with a stable message that the UI can pattern-match
+/// to choose the right "Open Settings" pane.
+public enum RecordingSessionError: LocalizedError {
+    case cameraPermissionDenied
+
+    public var errorDescription: String? {
+        switch self {
+        case .cameraPermissionDenied:
+            return "Camera permission denied — enable it in System Settings → Privacy & Security → Camera, then try again."
+        }
+    }
+}
+
 /// Orchestrates a single recording: starts the screen capture (with optional
 /// system audio), the cursor recorder, the webcam recorder, and the microphone
 /// recorder together; stops them together; writes a `ProjectBundle` on disk.
@@ -88,7 +103,20 @@ public final class RecordingSession {
             do {
                 let webcamURL = bundle.url.appendingPathComponent("webcam.mov")
                 try await webcamRecorder.start(outputURL: webcamURL)
+            } catch WebcamRecorderError.permissionDenied {
+                // Permission errors MUST surface to the UI — silently dropping
+                // the webcam track makes the failure invisible (the recording
+                // appears to succeed but has no webcam, and the user never
+                // sees a chance to grant access). Tear down what we already
+                // started and propagate as a recognisable permission error.
+                NSLog("BaseStudio: webcam permission denied — aborting recording")
+                _ = cursorRecorder.stop()
+                if options.includeMic { _ = await micRecorder.stop() }
+                state = .idle
+                throw RecordingSessionError.cameraPermissionDenied
             } catch {
+                // Non-permission webcam failures (e.g. no device attached)
+                // remain a soft warning — recording proceeds without webcam.
                 NSLog("BaseStudio: webcam start failed: \(error)")
             }
         }

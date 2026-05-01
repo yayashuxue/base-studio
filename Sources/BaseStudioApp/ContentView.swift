@@ -183,8 +183,22 @@ struct ContentView: View {
                     .foregroundStyle(.orange)
                 Text(m).font(.caption).foregroundStyle(.red).lineLimit(3)
                 if m.contains("permission") || m.contains("Privacy") || m.contains("relaunch") {
+                    // Pick the right Privacy pane for the failing subsystem.
+                    // The previous hard-coded `Privacy_ScreenCapture` sent
+                    // users to the wrong place when the failure was actually
+                    // a camera or microphone permission issue.
+                    let lower = m.lowercased()
+                    let anchor: String = {
+                        if lower.contains("camera") || lower.contains("webcam") {
+                            return "Privacy_Camera"
+                        } else if lower.contains("microphone") || lower.contains("mic ") || lower.contains("audio") {
+                            return "Privacy_Microphone"
+                        } else {
+                            return "Privacy_ScreenCapture"
+                        }
+                    }()
                     Button("Open Settings") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
                             NSWorkspace.shared.open(url)
                         }
                     }
