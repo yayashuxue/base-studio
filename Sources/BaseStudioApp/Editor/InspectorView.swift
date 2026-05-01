@@ -286,9 +286,10 @@ struct InspectorView: View {
 
     @ViewBuilder
     private func backgroundControls(_ inst: NodeInstance) -> some View {
-        // The 90% path: pick a preset. Anything finer (custom colors,
-        // gradient style, padding/shadow) lives in the disclosure below
-        // so the panel reads as "a few images, pick one" by default.
+        // Pick a preset — that's it. Each preset bakes in its gradient
+        // style, so there is no separate Linear/Radial/Mesh row, no color
+        // pickers, and no shape sliders to fiddle with. Per julie:
+        // "简单简单再简单 — 几个图就好".
         let cols = [GridItem(.adaptive(minimum: 64), spacing: BS.Space.tight)]
         LazyVGrid(columns: cols, spacing: BS.Space.tight) {
             ForEach(BackgroundPreset.all, id: \.name) { p in
@@ -312,65 +313,6 @@ struct InspectorView: View {
                 .help(p.name)
             }
         }
-
-        Button(action: {}) {
-            HStack(spacing: BS.Space.tight - 2) {
-                Image(systemName: "square.and.arrow.up")
-                    .font(.system(size: 11))
-                Text("Upload your own…")
-                    .font(BS.Font.label)
-            }
-            .foregroundStyle(BS.Color.textTertiary)
-            .frame(maxWidth: .infinity, minHeight: 28)
-            .background(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .fill(BS.Color.surface.opacity(0.5))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .strokeBorder(BS.Color.hairline.opacity(0.5),
-                                  style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(true)
-        .help("Custom background images coming in the next release.")
-        .padding(.top, BS.Space.tight - 2)
-
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: BS.Space.snug) {
-                scalarSlider(inst, name: "paddingPx", label: "Padding", range: 0...200)
-                scalarSlider(inst, name: "cornerRadiusPx", label: "Corner radius", range: 0...80)
-                scalarSlider(inst, name: "shadowRadiusPx", label: "Shadow blur", range: 0...100)
-                scalarSlider(inst, name: "shadowOpacity", label: "Shadow strength", range: 0...1)
-
-                let curStyle = Int(inst.bindings["bgStyle"]?.constantScalar ?? 0)
-                HStack(spacing: BS.Space.micro + 2) {
-                    ForEach([(0, "Linear"), (1, "Radial"), (2, "Mesh")], id: \.0) { (v, label) in
-                        segmentedButton(
-                            text: label,
-                            isOn: curStyle == v,
-                            action: {
-                                state.updateNodeBinding(
-                                    instanceID: inst.instanceID,
-                                    paramName: "bgStyle",
-                                    .constant(.scalar(Double(v)))
-                                )
-                            }
-                        )
-                    }
-                }
-
-                colorRow(inst, name: "bgTop", label: "Top color")
-                colorRow(inst, name: "bgBottom", label: "Bottom color")
-            }
-            .padding(.top, BS.Space.tight)
-        } label: {
-            Text("Customize")
-                .font(BS.Font.caption)
-                .foregroundStyle(BS.Color.textTertiary)
-        }
-        .padding(.top, BS.Space.snug)
     }
 
     // MARK: - Zoom (manual + event-driven)
@@ -656,6 +598,8 @@ struct InspectorView: View {
     private func applyPreset(_ inst: NodeInstance, _ p: BackgroundPreset) {
         state.updateNodeBinding(instanceID: inst.instanceID, paramName: "bgTop", .constant(p.top))
         state.updateNodeBinding(instanceID: inst.instanceID, paramName: "bgBottom", .constant(p.bottom))
+        state.updateNodeBinding(instanceID: inst.instanceID, paramName: "bgStyle",
+                                .constant(.scalar(Double(p.style))))
     }
 }
 
@@ -680,43 +624,36 @@ struct BackgroundPreset {
     let name: String
     let top: ParamValue
     let bottom: ParamValue
+    /// Matches `BackgroundCompose.bgStyle`: 0 = linear, 1 = radial, 2 = mesh.
+    /// Each preset picks the style that flatters its palette so the rendered
+    /// canvas matches the tile and feels distinctive instead of "two flat
+    /// blocks of color".
+    let style: Int
 
+    /// Five hand-picked presets covering the common moods (dark, warm, light,
+    /// cool, vibrant). Kept short on purpose — Screen Studio / CleanShot ship
+    /// roughly this many. More palette = decision fatigue, not more taste.
     static let all: [BackgroundPreset] = [
+        // Desaturated mid-tones — these read as "designer", not "color picker".
         .init(name: "Midnight",
-              top: .color(r: 0.13, g: 0.18, b: 0.32, a: 1),
-              bottom: .color(r: 0.05, g: 0.06, b: 0.10, a: 1)),
-        .init(name: "Sunset",
-              top: .color(r: 0.99, g: 0.41, b: 0.30, a: 1),
-              bottom: .color(r: 0.55, g: 0.13, b: 0.45, a: 1)),
-        .init(name: "Forest",
-              top: .color(r: 0.10, g: 0.32, b: 0.18, a: 1),
-              bottom: .color(r: 0.02, g: 0.10, b: 0.06, a: 1)),
-        .init(name: "Cotton",
-              top: .color(r: 0.95, g: 0.96, b: 0.98, a: 1),
-              bottom: .color(r: 0.78, g: 0.83, b: 0.92, a: 1)),
-        .init(name: "Pumpkin",
-              top: .color(r: 1.00, g: 0.65, b: 0.35, a: 1),
-              bottom: .color(r: 0.80, g: 0.30, b: 0.20, a: 1)),
-        .init(name: "Ocean",
-              top: .color(r: 0.10, g: 0.50, b: 0.90, a: 1),
-              bottom: .color(r: 0.02, g: 0.10, b: 0.30, a: 1)),
-        .init(name: "Vapor",
-              top: .color(r: 0.95, g: 0.55, b: 0.95, a: 1),
-              bottom: .color(r: 0.20, g: 0.55, b: 0.95, a: 1)),
-        .init(name: "Mint",
-              top: .color(r: 0.45, g: 0.95, b: 0.78, a: 1),
-              bottom: .color(r: 0.10, g: 0.55, b: 0.50, a: 1)),
-        .init(name: "Coral",
-              top: .color(r: 1.00, g: 0.55, b: 0.55, a: 1),
-              bottom: .color(r: 0.95, g: 0.30, b: 0.45, a: 1)),
-        .init(name: "Slate",
-              top: .color(r: 0.40, g: 0.45, b: 0.55, a: 1),
-              bottom: .color(r: 0.12, g: 0.15, b: 0.20, a: 1)),
-        .init(name: "Cream",
-              top: .color(r: 0.99, g: 0.93, b: 0.78, a: 1),
-              bottom: .color(r: 0.94, g: 0.78, b: 0.55, a: 1)),
-        .init(name: "Aurora",
-              top: .color(r: 0.30, g: 0.92, b: 0.65, a: 1),
-              bottom: .color(r: 0.55, g: 0.22, b: 0.78, a: 1)),
+              top: .color(r: 0.18, g: 0.21, b: 0.30, a: 1),
+              bottom: .color(r: 0.06, g: 0.07, b: 0.11, a: 1),
+              style: 1),
+        .init(name: "Dusk",
+              top: .color(r: 0.92, g: 0.55, b: 0.48, a: 1),
+              bottom: .color(r: 0.36, g: 0.20, b: 0.42, a: 1),
+              style: 2),
+        .init(name: "Linen",
+              top: .color(r: 0.96, g: 0.95, b: 0.92, a: 1),
+              bottom: .color(r: 0.84, g: 0.82, b: 0.78, a: 1),
+              style: 0),
+        .init(name: "Tide",
+              top: .color(r: 0.30, g: 0.55, b: 0.78, a: 1),
+              bottom: .color(r: 0.08, g: 0.18, b: 0.32, a: 1),
+              style: 1),
+        .init(name: "Sage",
+              top: .color(r: 0.55, g: 0.72, b: 0.62, a: 1),
+              bottom: .color(r: 0.18, g: 0.32, b: 0.30, a: 1),
+              style: 2),
     ]
 }
