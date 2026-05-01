@@ -95,7 +95,7 @@ public final class RecordingSession {
                 let url = bundle.url.appendingPathComponent("mic.m4a")
                 try await micRecorder.start(outputURL: url)
             } catch {
-                NSLog("BaseStudio: mic start failed: \(error)")
+                BSLog.warn("mic start failed: \(error)")
             }
         }
 
@@ -109,7 +109,7 @@ public final class RecordingSession {
                 // appears to succeed but has no webcam, and the user never
                 // sees a chance to grant access). Tear down what we already
                 // started and propagate as a recognisable permission error.
-                NSLog("BaseStudio: webcam permission denied — aborting recording")
+                BSLog.error("webcam permission denied — aborting recording")
                 _ = cursorRecorder.stop()
                 if options.includeMic { _ = await micRecorder.stop() }
                 state = .idle
@@ -117,7 +117,7 @@ public final class RecordingSession {
             } catch {
                 // Non-permission webcam failures (e.g. no device attached)
                 // remain a soft warning — recording proceeds without webcam.
-                NSLog("BaseStudio: webcam start failed: \(error)")
+                BSLog.warn("webcam start failed: \(error)")
             }
         }
 
@@ -139,13 +139,51 @@ public final class RecordingSession {
         defer { state = .idle }
         guard let bundle else { fatalError("no bundle") }
 
+        // Finalize sequentially: screen first, then webcam, then mic. The
+        // earlier `async let` parallelization tripped a VideoToolbox session
+        // conflict — two H.264 `AVAssetWriter.finishWriting()` calls
+        // overlapping invalidates one of the encoder sessions
+        // (`kVTInvalidSessionErr -12785`), and the loser writes a 0-byte .mov.
+        // The Stop button cost of serializing is ~200ms; that's the right
+        // trade. Don't reintroduce parallel finalize without holding a per-
+        // process VTCompressionSession lock.
         let screenResult = try await screenRecorder.stop()
+        let webcamResult: WebcamRecorder.Result? = options.includeWebcam
+            ? await webcamRecorder.stop()
+            : nil
+        let micResult: MicRecorder.Result? = options.includeMic
+            ? await micRecorder.stop()
+            : nil
         let cursor = cursorRecorder.stop()
-        if options.includeWebcam { _ = await webcamRecorder.stop() }
-        if options.includeMic { _ = await micRecorder.stop() }
 
         let cursorData = try JSONEncoder.pretty.encode(cursor)
         try cursorData.write(to: bundle.cursorURL, options: .atomic)
+
+        var sourceInfo: [String: SourceMediaInfo] = [
+            SourceID.screen: SourceMediaInfo(
+                firstVideoPTS: TimePoint(screenResult.firstPTS),
+                lastVideoPTS: TimePoint(screenResult.lastPTS),
+                widthPx: screenResult.widthPx,
+                heightPx: screenResult.heightPx
+            ),
+        ]
+        if let w = webcamResult, w.firstPTS != .zero {
+            sourceInfo[SourceID.webcam] = SourceMediaInfo(
+                firstVideoPTS: TimePoint(w.firstPTS),
+                lastVideoPTS: TimePoint(w.lastPTS),
+                widthPx: w.widthPx,
+                heightPx: w.heightPx
+            )
+        }
+
+        // micFirstPTS lets the export audio mixer convert the trim window
+        // (host-time) into a file-time origin for mic.m4a. Without it, the
+        // mixer would subtract host-time from the mic reader's file-time PTS
+        // and produce massively negative timeline samples — the "I can't hear
+        // mic OR system audio in the export" symptom.
+        let micFirstPTS: TimePoint? = (micResult?.firstPTS).flatMap {
+            $0 == .zero ? nil : TimePoint($0)
+        }
 
         let meta = RecordingMetadata(
             displayID: screenResult.displayID,
@@ -157,7 +195,9 @@ public final class RecordingSession {
             displayWidthPt: Double(screenResult.displaySizePt.width),
             displayHeightPt: Double(screenResult.displaySizePt.height),
             firstVideoPTS: TimePoint(screenResult.firstPTS),
-            lastVideoPTS: TimePoint(screenResult.lastPTS)
+            lastVideoPTS: TimePoint(screenResult.lastPTS),
+            sources: sourceInfo,
+            micFirstPTS: micFirstPTS
         )
         let metaData = try JSONEncoder.pretty.encode(meta)
         try metaData.write(to: bundle.metadataURL, options: .atomic)

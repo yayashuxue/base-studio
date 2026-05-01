@@ -42,11 +42,23 @@ APPLE_DEV_ID=$(security find-identity -v -p codesigning 2>/dev/null \
     | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 SELF_SIGNED_NAME="Base Studio Dev"
 
+# Hardened-runtime device entitlements. Required so AVCaptureDevice can
+# actually open the camera / microphone — without these the OS silently
+# blocks the call before TCC ever prompts the user, and Base Studio never
+# appears in System Settings → Privacy → Camera. Apple Development /
+# Distribution certs in particular enforce this strictly.
+ENTITLEMENTS="Resources/BaseStudio.entitlements"
+if [[ ! -f "${ENTITLEMENTS}" ]]; then
+    echo "✗ Missing entitlements file: ${ENTITLEMENTS}" >&2
+    exit 1
+fi
+
 if [[ -n "${APPLE_DEV_ID}" ]]; then
     echo "→ Signing with Apple Developer cert: ${APPLE_DEV_ID}"
     codesign --force --deep --sign "${APPLE_DEV_ID}" \
         --identifier com.basestudio.dev \
         --options runtime \
+        --entitlements "${ENTITLEMENTS}" \
         "${APP}" >/dev/null
 elif security find-identity -v -p codesigning 2>/dev/null \
         | grep -q "\"${SELF_SIGNED_NAME}\""; then
@@ -54,12 +66,14 @@ elif security find-identity -v -p codesigning 2>/dev/null \
     codesign --force --deep --sign "${SELF_SIGNED_NAME}" \
         --identifier com.basestudio.dev \
         --options runtime \
+        --entitlements "${ENTITLEMENTS}" \
         "${APP}" >/dev/null
 else
     echo "→ Signing ad-hoc (no stable identity; permission will re-prompt on every rebuild)"
     echo "   Run ./scripts/setup-dev-cert.sh once to fix this."
     codesign --force --deep --sign - \
         --identifier com.basestudio.dev \
+        --entitlements "${ENTITLEMENTS}" \
         "${APP}" >/dev/null
 fi
 

@@ -21,7 +21,7 @@ public enum PolishPreset {
         ]
 
         let screen = SourceClip(
-            id: "screen",
+            id: SourceID.screen,
             relativeMediaPath: "screen.mov",
             widthPx: meta.widthPx,
             heightPx: meta.heightPx,
@@ -31,15 +31,29 @@ public enum PolishPreset {
 
         var sources: [SourceClip] = [screen]
 
-        // Webcam, if present.
-        let webcamURL = bundle.url.appendingPathComponent("webcam.mov")
-        let hasWebcam = FileManager.default.fileExists(atPath: webcamURL.path)
+        // Webcam: trust the metadata as the source of truth. New recordings
+        // write `sources["webcam"]` only when the webcam track was actually
+        // captured; legacy bundles (pre-per-source-info) fall back to a
+        // disk probe + screen's firstPTS. Preferring the metadata side
+        // avoids the TOCTOU window where the .mov could vanish between the
+        // existence check and the open, and removes one needless I/O on the
+        // common path.
+        let webcamInfo = meta.sources?[SourceID.webcam]
+        let hasWebcam: Bool = {
+            if webcamInfo != nil { return true }
+            // Legacy bundle: no per-source metadata. Probe the disk.
+            let url = bundle.url.appendingPathComponent("webcam.mov")
+            return FileManager.default.fileExists(atPath: url.path)
+        }()
         if hasWebcam {
+            let webcamFirstPTS = webcamInfo?.firstVideoPTS ?? meta.firstVideoPTS
+            let webcamW = webcamInfo?.widthPx ?? 1280
+            let webcamH = webcamInfo?.heightPx ?? 720
             let webcam = SourceClip(
-                id: "webcam",
+                id: SourceID.webcam,
                 relativeMediaPath: "webcam.mov",
-                widthPx: 1280, heightPx: 720,   // overwritten by reader at render time
-                firstPTS: meta.firstVideoPTS,
+                widthPx: webcamW, heightPx: webcamH,
+                firstPTS: webcamFirstPTS,
                 sidecars: []
             )
             sources.append(webcam)
@@ -127,7 +141,7 @@ public enum PolishPreset {
 
         let videoTrack = VideoTrack(segments: [
             VideoSegment(
-                sourceID: "screen",
+                sourceID: SourceID.screen,
                 sourceIn: meta.firstVideoPTS,
                 sourceOut: meta.lastVideoPTS,
                 timelineIn: TimePoint(.zero)

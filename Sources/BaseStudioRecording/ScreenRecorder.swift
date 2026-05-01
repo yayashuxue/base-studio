@@ -102,7 +102,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // it can return stale `false` even after the user grants the renamed
         // "Screen & System Audio Recording" permission, causing a false denial.
         // Let SCK try directly; surface its real error to the UI if it fails.
-        NSLog("BaseStudio: preflight=\(CGPreflightScreenCaptureAccess()) — calling SCK directly")
+        BSLog.info("preflight=\(CGPreflightScreenCaptureAccess()) — calling SCK directly")
 
         let content: SCShareableContent
         do {
@@ -113,7 +113,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             // Translate SCK's permission errors into our typed error so the UI
             // can show Open Settings + Quit & Relaunch buttons.
             let ns = error as NSError
-            NSLog("BaseStudio: SCShareableContent failed code=\(ns.code) domain=\(ns.domain) — \(ns.localizedDescription)")
+            BSLog.error("SCShareableContent failed code=\(ns.code) domain=\(ns.domain) — \(ns.localizedDescription)")
             if ns.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain"
                 || ns.code == -3801 || ns.code == -3812 {
                 throw ScreenRecorderError.screenRecordingDenied
@@ -277,7 +277,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         videoInput.markAsFinished()
         audioInput?.markAsFinished()
         await writer.finishWriting()
-        NSLog("BaseStudio: stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
+        BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
         self.stream = nil
         self.writer = nil
         self.videoInput = nil
@@ -318,18 +318,18 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                status == .stopped || status == .suspended {
                 screenFramesFiltered += 1
                 if screenFramesFiltered % 60 == 1 {
-                    NSLog("BaseStudio: filtered screen frame status=\(status.rawValue)")
+                    BSLog.warn("filtered screen frame status=\(status.rawValue)")
                 }
                 return
             }
             guard let videoInput else {
-                NSLog("BaseStudio: videoInput is nil; dropping frame")
+                BSLog.warn("videoInput is nil; dropping frame")
                 return
             }
             guard videoInput.isReadyForMoreMediaData else {
                 screenFramesNotReady += 1
                 if screenFramesNotReady % 60 == 1 {
-                    NSLog("BaseStudio: writer not ready, dropping frame (\(screenFramesNotReady))")
+                    BSLog.warn("writer not ready, dropping frame (\(screenFramesNotReady))")
                 }
                 return
             }
@@ -339,17 +339,17 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 firstPTS = pts
                 if let writer = writer {
                     writer.startSession(atSourceTime: pts)
-                    NSLog("BaseStudio: startSession at pts=\(pts.seconds), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
+                    BSLog.info("startSession at pts=\(pts.seconds), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
                 }
             }
             lastPTS = pts
             let ok = videoInput.append(sampleBuffer)
             screenFramesAppended += 1
             if !ok {
-                NSLog("BaseStudio: append failed, writer.error=\(String(describing: writer?.error))")
+                BSLog.error("append failed, writer.error=\(String(describing: writer?.error))")
             }
             if screenFramesAppended % 60 == 1 {
-                NSLog("BaseStudio: appended \(screenFramesAppended) frames")
+                BSLog.info("appended \(screenFramesAppended) frames")
             }
             return
         }
@@ -368,7 +368,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     // MARK: - SCStreamDelegate
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
-        NSLog("BaseStudio: SCStream stopped with error: \(error)")
+        BSLog.error("SCStream stopped with error: \(error)")
     }
 
 }

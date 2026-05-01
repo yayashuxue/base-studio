@@ -88,6 +88,17 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
             try FileManager.default.removeItem(at: outputURL)
         }
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        // NOTE on task #8 (HEVC encoder slot exhaustion hypothesis):
+        // An earlier attempt added `kVTVideoEncoderSpecification_*` keys to
+        // force software H.264 encoding for the webcam. The keys went into
+        // `AVVideoCompressionPropertiesKey` — AVAssetWriterInput validates
+        // that dict strictly and threw NSInvalidArgumentException → SIGABRT
+        // on launch (crash report BaseStudio-2026-04-30-232456.ips). The
+        // CORRECT placement is `AVVideoEncoderSpecificationKey` at the top
+        // level, but I haven't verified that path doesn't crash differently
+        // on this macOS (14.6.1) yet. Re-attempt only after a clean repro
+        // of the original 0-byte screen.mov bug — a single observation isn't
+        // strong evidence the slot-exhaustion hypothesis is right.
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: widthPx,
