@@ -286,53 +286,91 @@ struct InspectorView: View {
 
     @ViewBuilder
     private func backgroundControls(_ inst: NodeInstance) -> some View {
-        scalarSlider(inst, name: "paddingPx", label: "Padding", range: 0...200)
-        scalarSlider(inst, name: "cornerRadiusPx", label: "Corner radius", range: 0...80)
-        scalarSlider(inst, name: "shadowRadiusPx", label: "Shadow blur", range: 0...100)
-        scalarSlider(inst, name: "shadowOpacity", label: "Shadow strength", range: 0...1)
-
-        let curStyle = Int(inst.bindings["bgStyle"]?.constantScalar ?? 0)
-        HStack(spacing: BS.Space.micro + 2) {
-            ForEach([(0, "Linear"), (1, "Radial"), (2, "Mesh")], id: \.0) { (v, label) in
-                segmentedButton(
-                    text: label,
-                    isOn: curStyle == v,
-                    action: {
-                        state.updateNodeBinding(
-                            instanceID: inst.instanceID,
-                            paramName: "bgStyle",
-                            .constant(.scalar(Double(v)))
-                        )
-                    }
-                )
-            }
-        }
-
-        colorRow(inst, name: "bgTop", label: "Top color")
-        colorRow(inst, name: "bgBottom", label: "Bottom color")
-
-        Text("Presets")
-            .font(BS.Font.caption)
-            .foregroundStyle(BS.Color.textTertiary)
-            .padding(.top, BS.Space.micro)
-        let cols = [GridItem(.adaptive(minimum: 32), spacing: BS.Space.tight - 2)]
-        LazyVGrid(columns: cols, spacing: BS.Space.tight - 2) {
+        // The 90% path: pick a preset. Anything finer (custom colors,
+        // gradient style, padding/shadow) lives in the disclosure below
+        // so the panel reads as "a few images, pick one" by default.
+        let cols = [GridItem(.adaptive(minimum: 64), spacing: BS.Space.tight)]
+        LazyVGrid(columns: cols, spacing: BS.Space.tight) {
             ForEach(BackgroundPreset.all, id: \.name) { p in
                 Button(action: { applyPreset(inst, p) }) {
-                    RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                        .fill(LinearGradient(
-                            colors: [Color(p.top.toNSColor()), Color(p.bottom.toNSColor())],
-                            startPoint: .top, endPoint: .bottom))
-                        .frame(width: 32, height: 32)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
-                                .strokeBorder(BS.Color.hairline, lineWidth: 1)
-                        )
+                    VStack(spacing: 4) {
+                        RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+                            .fill(LinearGradient(
+                                colors: [Color(p.top.toNSColor()), Color(p.bottom.toNSColor())],
+                                startPoint: .top, endPoint: .bottom))
+                            .frame(height: 44)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: BS.Radius.chip - 2, style: .continuous)
+                                    .strokeBorder(BS.Color.hairline, lineWidth: 1)
+                            )
+                        Text(p.name)
+                            .font(BS.Font.caption)
+                            .foregroundStyle(BS.Color.textTertiary)
+                    }
                 }
                 .buttonStyle(.plain)
                 .help(p.name)
             }
         }
+
+        Button(action: {}) {
+            HStack(spacing: BS.Space.tight - 2) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 11))
+                Text("Upload your own…")
+                    .font(BS.Font.label)
+            }
+            .foregroundStyle(BS.Color.textTertiary)
+            .frame(maxWidth: .infinity, minHeight: 28)
+            .background(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .fill(BS.Color.surface.opacity(0.5))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
+                    .strokeBorder(BS.Color.hairline.opacity(0.5),
+                                  style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(true)
+        .help("Custom background images coming in the next release.")
+        .padding(.top, BS.Space.tight - 2)
+
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: BS.Space.snug) {
+                scalarSlider(inst, name: "paddingPx", label: "Padding", range: 0...200)
+                scalarSlider(inst, name: "cornerRadiusPx", label: "Corner radius", range: 0...80)
+                scalarSlider(inst, name: "shadowRadiusPx", label: "Shadow blur", range: 0...100)
+                scalarSlider(inst, name: "shadowOpacity", label: "Shadow strength", range: 0...1)
+
+                let curStyle = Int(inst.bindings["bgStyle"]?.constantScalar ?? 0)
+                HStack(spacing: BS.Space.micro + 2) {
+                    ForEach([(0, "Linear"), (1, "Radial"), (2, "Mesh")], id: \.0) { (v, label) in
+                        segmentedButton(
+                            text: label,
+                            isOn: curStyle == v,
+                            action: {
+                                state.updateNodeBinding(
+                                    instanceID: inst.instanceID,
+                                    paramName: "bgStyle",
+                                    .constant(.scalar(Double(v)))
+                                )
+                            }
+                        )
+                    }
+                }
+
+                colorRow(inst, name: "bgTop", label: "Top color")
+                colorRow(inst, name: "bgBottom", label: "Bottom color")
+            }
+            .padding(.top, BS.Space.tight)
+        } label: {
+            Text("Customize")
+                .font(BS.Font.caption)
+                .foregroundStyle(BS.Color.textTertiary)
+        }
+        .padding(.top, BS.Space.snug)
     }
 
     // MARK: - Zoom (manual + event-driven)

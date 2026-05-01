@@ -32,6 +32,11 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
 
     enum Phase: Equatable {
         case idle
+        /// 3-second countdown overlay is showing; window has already been
+        /// hidden so it isn't captured. The user cannot start a *second*
+        /// recording from this state — `canStartRecording` returns false
+        /// until we drop back to `.idle` (success or failure).
+        case countingDown
         case recording
         case finalizing
         case done(ProjectBundle)
@@ -39,7 +44,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
 
         static func == (lhs: Phase, rhs: Phase) -> Bool {
             switch (lhs, rhs) {
-            case (.idle, .idle), (.recording, .recording), (.finalizing, .finalizing):
+            case (.idle, .idle),
+                 (.countingDown, .countingDown),
+                 (.recording, .recording),
+                 (.finalizing, .finalizing):
                 return true
             case (.done(let a), .done(let b)):
                 return a.url == b.url
@@ -48,6 +56,16 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             default:
                 return false
             }
+        }
+    }
+
+    /// True only when no recording is in flight (idle, done, or failed).
+    /// Bind the Record CTA's `.disabled` to `!canStartRecording` so the
+    /// button can't fire twice during countdown / recording / finalize.
+    var canStartRecording: Bool {
+        switch phase {
+        case .idle, .done, .failed: return true
+        case .countingDown, .recording, .finalizing: return false
         }
     }
 
@@ -61,9 +79,14 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     @Published var phase: Phase = .idle
     @Published var lastBundle: ProjectBundle?
     @Published var exportPhase: ExportPhase = .none
-    @Published var includeWebcam: Bool = false
+    // Default to capturing every input the user has hardware/permission for —
+    // a Screen-Studio style "press record and you have everything you need
+    // later" stance. Individual toggles still let the user opt out per
+    // recording. Permission failures degrade gracefully (mic/webcam start
+    // is wrapped in do/catch in `RecordingSession`).
+    @Published var includeWebcam: Bool = true
     @Published var includeSystemAudio: Bool = true
-    @Published var includeMic: Bool = false
+    @Published var includeMic: Bool = true
     @Published var showFloatingPanel: Bool = true    // ON by default — most reliable Stop UI
     @Published var editorState: EditorState?
     @Published var library: [RecordingsLibrary.Entry] = []
@@ -163,6 +186,17 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     }
 
     func openRecording(_ entry: RecordingsLibrary.Entry) {
+        // Broken bundles (zero-byte screen.mov from a finalize-time encoder
+        // crash, missing metadata.json, etc.) — bail before EditorState.load
+        // crashes / hangs. We surface a `.failed` phase with reveal/delete
+        // affordances rendered by the chrome.
+        if !entry.isPlayable {
+            self.editorState = nil
+            self.lastBundle = entry.bundle
+            self.exportPhase = .none
+            self.phase = .failed("Recording is incomplete (screen.mov is empty or metadata.json is missing). Reveal in Finder or delete it.")
+            return
+        }
         do {
             self.editorState = try EditorState.load(bundleURL: entry.id)
             self.lastBundle = entry.bundle
@@ -201,12 +235,24 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             phase = .failed("Requires macOS 13+")
             return
         }
+        // Single source of truth for "is a recording already in flight?".
+        // Without this guard, rapid clicks (or ⌘R held) spawn parallel
+        // RecordingSessions and AVCaptureSessions, deadlock on the camera,
+        // and overwrite each other's bundles.
+        guard canStartRecording else {
+            BSLog.warn("startRecording ignored — phase=\(phase)")
+            return
+        }
         hiddenWindow = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) })
         exportPhase = .none
+        // Hide the main window NOW (before the 3-second countdown), not after
+        // it. Otherwise the app's own UI gets captured for the first 3 seconds
+        // of every recording — the exact thing julie hit in #2.
+        hiddenWindow?.orderOut(nil)
+        phase = .countingDown
 
         countdown.run(seconds: 3) { [weak self] in
             guard let self else { return }
-            self.hiddenWindow?.orderOut(nil)
             self.beginCapture()
         }
     }
@@ -259,6 +305,14 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
 
     func stopRecording() {
         guard #available(macOS 13.0, *), let session = session as? RecordingSession else { return }
+        // Symmetrical to the startRecording guard: ⌘⇧. + the menu-bar Stop +
+        // the floating panel Stop can all fire while the user mashes them.
+        // RecordingSession.stop() has `precondition(state == .recording)` —
+        // a second call without this guard crashes the app.
+        guard phase == .recording else {
+            BSLog.warn("stopRecording ignored — phase=\(phase)")
+            return
+        }
         phase = .finalizing
         recordingPanel.hide()
         menuBar.hide()

@@ -10,6 +10,12 @@ public enum RecordingsLibrary {
         public let displayName: String
         public let modifiedAt: Date
         public let hasPolishedExport: Bool
+        /// `false` when the bundle is missing `screen.mov` or `metadata.json`,
+        /// or `screen.mov` is zero bytes (the symptom from a recording that
+        /// hit `kVTInvalidSessionErr` at finalize time). The entry stays in
+        /// the library so the user can still see it and Reveal/Delete it,
+        /// but trying to open it will land in a broken-state fallback.
+        public let isPlayable: Bool
     }
 
     public static let directoryName = "BaseStudio"
@@ -39,11 +45,17 @@ public enum RecordingsLibrary {
                 let attrs = (try? fm.attributesOfItem(atPath: url.path)) ?? [:]
                 let date = (attrs[.modificationDate] as? Date) ?? Date.distantPast
                 let polished = url.appendingPathComponent("polished.mp4")
+                let bundle = ProjectBundle(url: url)
+                let metadataPresent = fm.fileExists(atPath: bundle.metadataURL.path)
+                let screenAttrs = try? fm.attributesOfItem(atPath: bundle.screenURL.path)
+                let screenSize = (screenAttrs?[.size] as? NSNumber)?.intValue ?? 0
+                let screenPlayable = screenAttrs != nil && screenSize > 0
                 return Entry(
                     id: url,
                     displayName: url.deletingPathExtension().lastPathComponent,
                     modifiedAt: date,
-                    hasPolishedExport: fm.fileExists(atPath: polished.path)
+                    hasPolishedExport: fm.fileExists(atPath: polished.path),
+                    isPlayable: metadataPresent && screenPlayable
                 )
             }
             .sorted { $0.modifiedAt > $1.modifiedAt }

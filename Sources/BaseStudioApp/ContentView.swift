@@ -52,14 +52,8 @@ struct ContentView: View {
         .onChange(of: vm.selectedTarget) { newTarget in
             screenPreview.setTarget(newTarget)
         }
-        .onChange(of: vm.phase) { phase in
-            // Pause screen preview during/after recording — both to free the
-            // capture path while ScreenRecorder is running and because the
-            // preview becomes irrelevant once we're past Home.
-            switch phase {
-            case .recording, .finalizing, .countingDown: screenPreview.stop()
-            case .idle, .done, .failed: screenPreview.start()
-            }
+        .onChange(of: shouldRunScreenPreview) { run in
+            if run { screenPreview.start() } else { screenPreview.stop() }
         }
     }
 
@@ -134,6 +128,17 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(isExportingNow)
+    }
+
+    /// True only on Home (no editor) and when no recording is in flight. The
+    /// screen-preview tile is the only consumer; once an editor is loaded the
+    /// preview is off-screen, and the polling cost only adds to render lag.
+    private var shouldRunScreenPreview: Bool {
+        guard vm.editorState == nil else { return false }
+        switch vm.phase {
+        case .recording, .finalizing, .countingDown: return false
+        case .idle, .done, .failed: return true
+        }
     }
 
     private var canRecord: Bool {

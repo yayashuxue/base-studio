@@ -66,8 +66,20 @@ final class ScreenPreviewSession: ObservableObject {
 
     nonisolated private static func snapshot(for target: CaptureTarget) -> CGImage? {
         switch target {
-        case .display(let id):
-            return CGDisplayCreateImage(CGDirectDisplayID(id))
+        case .display:
+            // Capture everything *below* Base Studio's main window so the
+            // preview tile shows what would actually be recorded — without
+            // turning into an infinite mirror of the app inside itself.
+            if let ourWindow = ourMainWindowID() {
+                return CGWindowListCreateImage(
+                    .null, .optionOnScreenBelowWindow,
+                    ourWindow,
+                    [.boundsIgnoreFraming, .nominalResolution]
+                )
+            }
+            // Fallback: if we can't resolve our own window (rare), capture
+            // the whole display. The recursion is preferable to no preview.
+            return nil
         case .window(let id):
             return CGWindowListCreateImage(
                 .null, .optionIncludingWindow,
@@ -75,5 +87,21 @@ final class ScreenPreviewSession: ObservableObject {
                 [.boundsIgnoreFraming, .nominalResolution]
             )
         }
+    }
+
+    /// Lowest-z-order on-screen normal-layer window owned by our process —
+    /// effectively the main app window. Used as the anchor for "capture
+    /// everything below this window."
+    nonisolated private static func ourMainWindowID() -> CGWindowID? {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let opts: CGWindowListOption = [.optionOnScreenOnly]
+        guard let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: AnyObject]] else { return nil }
+        // Layer 0 = normal app window. Higher layers = panels, status bar, etc.
+        let mine = info.first { entry in
+            ((entry[kCGWindowOwnerPID as String] as? Int32) ?? -1) == pid &&
+            ((entry[kCGWindowLayer as String] as? Int) ?? -1) == 0
+        }
+        return mine?[kCGWindowNumber as String] as? CGWindowID
     }
 }
