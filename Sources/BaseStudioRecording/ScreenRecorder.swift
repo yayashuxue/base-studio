@@ -72,6 +72,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var screenFramesFiltered: Int = 0
     private var screenFramesNotReady: Int = 0
     private var screenFramesAppended: Int = 0
+    private var audioBuffersReceived: Int = 0
+    private var audioBuffersNonSilent: Int = 0
     private var displayID: UInt32 = 0
     private var widthPx: Int = 0
     private var heightPx: Int = 0
@@ -277,7 +279,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         videoInput.markAsFinished()
         audioInput?.markAsFinished()
         await writer.finishWriting()
-        BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
+        BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
         self.stream = nil
         self.writer = nil
         self.videoInput = nil
@@ -360,6 +362,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             guard firstPTS != nil else { return }
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             if firstAudioPTS == nil { firstAudioPTS = pts }
+            audioBuffersReceived += 1
+            if Self.bufferContainsAudio(sampleBuffer) { audioBuffersNonSilent += 1 }
             levels?.ingest(sampleBuffer: sampleBuffer, channel: .system)
             audioInput.append(sampleBuffer)
         }
@@ -371,4 +375,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         BSLog.error("SCStream stopped with error: \(error)")
     }
 
+    static func bufferContainsAudio(_ buffer: CMSampleBuffer) -> Bool {
+        AudioBufferProbe.containsNonZeroSample(buffer)
+    }
 }

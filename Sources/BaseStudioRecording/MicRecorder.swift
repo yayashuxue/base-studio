@@ -28,6 +28,8 @@ public final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     private var firstPTS: CMTime?
     private var lastPTS: CMTime?
     private var isRunning = false
+    private var bufferCount: Int = 0
+    private var nonSilentBufferCount: Int = 0
 
     private let levels: AudioLevels?
 
@@ -106,6 +108,10 @@ public final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         audioInput?.markAsFinished()
         await writer?.finishWriting()
         let r = Result(firstPTS: firstPTS ?? .zero, lastPTS: lastPTS ?? .zero)
+        BSLog.info("mic stopped — buffers=\(bufferCount) non-silent=\(nonSilentBufferCount)")
+        if bufferCount > 0 && nonSilentBufferCount == 0 {
+            BSLog.warn("mic produced ZERO non-silent buffers — input device likely has no live mic stream (Bluetooth A2DP profile, muted, or wrong device).")
+        }
         session = nil; output = nil; writer = nil; audioInput = nil
         isRunning = false
         return r
@@ -176,7 +182,13 @@ public final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             writer?.startSession(atSourceTime: pts)
         }
         lastPTS = pts
+        bufferCount += 1
+        if Self.bufferContainsAudio(sampleBuffer) { nonSilentBufferCount += 1 }
         levels?.ingest(sampleBuffer: sampleBuffer, channel: .mic)
         audioInput.append(sampleBuffer)
+    }
+
+    private static func bufferContainsAudio(_ buffer: CMSampleBuffer) -> Bool {
+        AudioBufferProbe.containsNonZeroSample(buffer)
     }
 }
