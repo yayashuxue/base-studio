@@ -87,7 +87,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     @Published var includeWebcam: Bool = true
     @Published var includeSystemAudio: Bool = true
     @Published var includeMic: Bool = true
-    @Published var showFloatingPanel: Bool = true    // ON by default — most reliable Stop UI
+    // OFF by default. The menu-bar status item (red ● + Stop) and ⌘⇧.
+    // global shortcut already cover Stop reliably; the floating panel adds
+    // a visual outline that distracts from the recorded screen.
+    @Published var showFloatingPanel: Bool = false
     @Published var editorState: EditorState?
     @Published var library: [RecordingsLibrary.Entry] = []
     @Published var displays: [DisplayInfo] = []

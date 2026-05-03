@@ -31,6 +31,7 @@ final class MenuBarController {
             button.contentTintColor = .systemRed
             button.font = .menuBarFont(ofSize: 0)
             button.title = " 0:00  Stop "
+            button.toolTip = "Click to stop recording  (⌘⇧.)"
         }
         statusItem = item
 
