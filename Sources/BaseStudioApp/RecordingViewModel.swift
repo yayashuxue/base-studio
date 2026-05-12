@@ -328,11 +328,11 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                     self?.restoreWindow()
                     self?.loadEditor(for: bundle)
                     self?.refreshLibrary()
-                    // If the user still has webcam toggled on, restart the home
-                    // preview so they can see themselves on the next recording.
-                    if let self = self, self.includeWebcam {
-                        Task { await self.webcamPreview?.startIfPossible() }
-                    }
+                    // Webcam preview lifecycle is driven by ContentView's
+                    // `shouldRunWebcamPreview` gate. Restarting here would
+                    // re-light the camera LED while the user is in the editor
+                    // — exactly the bug julie hit. The gate restarts the
+                    // preview when the user navigates back to Home.
                 }
             } catch {
                 await MainActor.run {

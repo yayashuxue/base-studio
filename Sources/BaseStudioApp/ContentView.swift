@@ -36,16 +36,15 @@ struct ContentView: View {
         .onAppear {
             vm.webcamPreview = webcamPreview
             // `.onChange` doesn't fire on initial value, so honour the
-            // current `includeWebcam` default + selectedTarget explicitly
-            // on first appear.
-            if vm.includeWebcam {
+            // current preview-gate state explicitly on first appear.
+            if shouldRunWebcamPreview {
                 Task { await webcamPreview.startIfPossible() }
             }
             screenPreview.setTarget(vm.selectedTarget)
         }
-        .onChange(of: vm.includeWebcam) { newValue in
+        .onChange(of: shouldRunWebcamPreview) { run in
             Task {
-                if newValue { await webcamPreview.startIfPossible() }
+                if run { await webcamPreview.startIfPossible() }
                 else { webcamPreview.stop() }
             }
         }
@@ -134,6 +133,19 @@ struct ContentView: View {
     /// screen-preview tile is the only consumer; once an editor is loaded the
     /// preview is off-screen, and the polling cost only adds to render lag.
     private var shouldRunScreenPreview: Bool {
+        guard vm.editorState == nil else { return false }
+        switch vm.phase {
+        case .recording, .finalizing, .countingDown: return false
+        case .idle, .done, .failed: return true
+        }
+    }
+
+    /// True only on Home with webcam toggled on, outside of an active capture.
+    /// Mirrors `shouldRunScreenPreview` — without this gate the camera LED
+    /// stayed lit after stop because the post-recording editor view kept the
+    /// preview session alive (and stopRecording explicitly restarted it).
+    private var shouldRunWebcamPreview: Bool {
+        guard vm.includeWebcam else { return false }
         guard vm.editorState == nil else { return false }
         switch vm.phase {
         case .recording, .finalizing, .countingDown: return false
