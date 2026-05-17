@@ -213,16 +213,22 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         } catch {
             throw ScreenRecorderError.writerSetupFailed(error.localizedDescription)
         }
-        // HEVC over H.264 for the recorded source: hardware encoder is more
-        // robust at high resolutions, accepts arbitrary dimensions, and handles
-        // 6MP @ 60fps easily on any Apple Silicon Mac.
+        // H.264 for the recorded source. We previously used HEVC for its better
+        // compression at high resolutions, but on certain macOS / display / GPU
+        // combinations the HEVC HW encoder rejects our SCK BGRA input on the
+        // very first frame with VideoToolbox error -16122, producing a 0-byte
+        // screen.mov + missing metadata.json (see Recording-20260517-155423).
+        // Webcam already uses H.264 and never hits this. Loom / Screen Studio /
+        // Tella all ship H.264 for screen capture for the same robustness reason.
+        // Bitrate kept the same; the file gets ~30% larger but it actually exists.
         let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
+            AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: widthPxFinal,
             AVVideoHeightKey: heightPxFinal,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: max(8_000_000, widthPxFinal * heightPxFinal * fps / 12),
                 AVVideoMaxKeyFrameIntervalKey: fps * 2,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
             ],
         ]
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
