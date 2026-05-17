@@ -10,11 +10,12 @@ public enum RecordingsLibrary {
         public let displayName: String
         public let modifiedAt: Date
         public let hasPolishedExport: Bool
-        /// `false` when the bundle is missing `screen.mov` or `metadata.json`,
-        /// or `screen.mov` is zero bytes (the symptom from a recording that
-        /// hit `kVTInvalidSessionErr` at finalize time). The entry stays in
-        /// the library so the user can still see it and Reveal/Delete it,
-        /// but trying to open it will land in a broken-state fallback.
+        /// `false` when the bundle is missing `metadata.json`, or `screen.mov`
+        /// is missing / smaller than a single-frame .mov (the symptom from a
+        /// recording that hit a HW-encoder error or `kVTInvalidSessionErr`
+        /// at finalize time). The entry stays in the library so the user can
+        /// still see it and Reveal/Delete it, but trying to open it will land
+        /// in a broken-state fallback.
         public let isPlayable: Bool
     }
 
@@ -49,7 +50,12 @@ public enum RecordingsLibrary {
                 let metadataPresent = fm.fileExists(atPath: bundle.metadataURL.path)
                 let screenAttrs = try? fm.attributesOfItem(atPath: bundle.screenURL.path)
                 let screenSize = (screenAttrs?[.size] as? NSNumber)?.intValue ?? 0
-                let screenPlayable = screenAttrs != nil && screenSize > 0
+                // A valid .mov with even a single H.264 frame is well >4KB.
+                // The broken state we want to reject is a writer that opened
+                // the container then failed before landing any frame — that
+                // leaves a ~36-byte stub (the May 11 / HEVC-encoder-error
+                // symptom). `>0` was too permissive.
+                let screenPlayable = screenSize > 4096
                 return Entry(
                     id: url,
                     displayName: url.deletingPathExtension().lastPathComponent,
