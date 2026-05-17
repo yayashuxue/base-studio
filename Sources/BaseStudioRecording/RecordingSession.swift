@@ -147,7 +147,20 @@ public final class RecordingSession {
         // The Stop button cost of serializing is ~200ms; that's the right
         // trade. Don't reintroduce parallel finalize without holding a per-
         // process VTCompressionSession lock.
-        let screenResult = try await screenRecorder.stop()
+        let screenResult: ScreenRecorder.Result
+        do {
+            screenResult = try await screenRecorder.stop()
+        } catch {
+            // Screen finalize failed — the bundle is unrecoverable, but we
+            // still need to (a) drain the other recorders so we don't leak a
+            // running webcam session / open mic file handle, and (b) drop a
+            // forensic sidecar so the broken bundle isn't a mystery later.
+            if options.includeWebcam { _ = await webcamRecorder.stop() }
+            if options.includeMic { _ = await micRecorder.stop() }
+            _ = cursorRecorder.stop()
+            writeFailureSidecar(bundle: bundle, phase: "screen.finishWriting", error: error)
+            throw error
+        }
         let webcamResult: WebcamRecorder.Result? = options.includeWebcam
             ? await webcamRecorder.stop()
             : nil
@@ -209,6 +222,19 @@ public final class RecordingSession {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
         return "Recording-\(f.string(from: Date()))"
+    }
+
+    private func writeFailureSidecar(bundle: ProjectBundle, phase: String, error: Error) {
+        let payload: [String: String] = [
+            "phase": phase,
+            "error": String(describing: error),
+            "time": ISO8601DateFormatter().string(from: Date()),
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+        try? data.write(to: bundle.failureURL, options: .atomic)
     }
 }
 

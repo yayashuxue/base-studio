@@ -14,6 +14,12 @@ public struct ProjectBundle {
     public var screenURL: URL { url.appendingPathComponent("screen.mov") }
     public var cursorURL: URL { url.appendingPathComponent("cursor.json") }
     public var metadataURL: URL { url.appendingPathComponent("metadata.json") }
+    /// Best-effort forensic sidecar written when `RecordingSession.stop()`
+    /// could not produce a valid bundle (e.g. the HW encoder erroring on the
+    /// first frame, finishWriting throwing). Presence = "this bundle is
+    /// known broken, here's what went wrong". Readers should treat it as
+    /// purely diagnostic.
+    public var failureURL: URL { url.appendingPathComponent("failure.json") }
 
     public init(url: URL) {
         self.url = url
