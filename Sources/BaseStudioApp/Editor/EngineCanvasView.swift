@@ -56,7 +56,7 @@ struct ScrubberView: View {
             .padding(8)
             .background(.white.opacity(0.08), in: Circle())
 
-            Text(formatTime(state.playheadSec))
+            Text(BS.Format.mmss(state.playheadSec))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 56, alignment: .trailing)
@@ -69,15 +69,10 @@ struct ScrubberView: View {
                 in: 0...max(0.1, state.timelineDurationSec)
             )
 
-            Text(formatTime(state.timelineDurationSec))
+            Text(BS.Format.mmss(state.timelineDurationSec))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 56)
         }
-    }
-
-    private func formatTime(_ s: Double) -> String {
-        let total = max(0, Int(s))
-        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }

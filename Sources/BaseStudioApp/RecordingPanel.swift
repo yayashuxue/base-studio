@@ -3,6 +3,12 @@ import AppKit
 import BaseStudioRecording
 import Foundation
 
+/// AppKit-side aliases for the Theme.swift palette. The `BS.Color.NS` enum
+/// is the single source of truth — these typealiases just keep call sites
+/// short. If you need a new colour here, add it to `BS.Color.NS` (and a
+/// matching SwiftUI `BS.Color` token), not as a one-off literal in this file.
+private typealias DockPaint = BS.Color.NS
+
 /// Always-visible floating Stop dock.
 ///
 /// Default position is **top-center**, just below the menu bar — the user
@@ -23,13 +29,6 @@ final class RecordingPanel {
     private var sysMeterLayer: CALayer?
 
     var onStop: (() -> Void)?
-
-    // Studio Console palette — kept in sync with Theme.swift.
-    private static let recordingRed = NSColor(srgbRed: 1.00, green: 0.231, blue: 0.188, alpha: 1.0)   // #FF3B30
-    private static let recordingGlow = NSColor(srgbRed: 1.00, green: 0.231, blue: 0.188, alpha: 0.40)
-    private static let textPrimary  = NSColor(srgbRed: 0.961, green: 0.961, blue: 0.969, alpha: 1.0)  // #F5F5F7
-    private static let meterMicColor = NSColor(srgbRed: 0.420, green: 0.796, blue: 0.467, alpha: 1.0) // #6BCB77
-    private static let meterSysColor = NSColor(srgbRed: 0.302, green: 0.639, blue: 1.000, alpha: 1.0) // #4DA3FF
 
     func show(webcamSession: AVCaptureSession? = nil, levels: AudioLevels? = nil) {
         self.audioLevels = levels
@@ -86,7 +85,7 @@ final class RecordingPanel {
         bg.state = .active
         bg.blendingMode = .behindWindow
         bg.wantsLayer = true
-        bg.layer?.cornerRadius = 18
+        bg.layer?.cornerRadius = BS.Radius.dock
         bg.layer?.masksToBounds = true
 
         // 1pt top inner highlight — "lit from above".
@@ -100,7 +99,6 @@ final class RecordingPanel {
         highlight.endPoint   = CGPoint(x: 1, y: 0.5)
         bg.layer?.addSublayer(highlight)
 
-        // Cursor x layout walker.
         var x: CGFloat = gutter
 
         // Pulsing red dot.
@@ -108,8 +106,8 @@ final class RecordingPanel {
         dotContainer.wantsLayer = true
         let dot = CAShapeLayer()
         dot.path = CGPath(ellipseIn: CGRect(x: 0, y: 0, width: dotW, height: dotW), transform: nil)
-        dot.fillColor = Self.recordingRed.cgColor
-        dot.shadowColor = Self.recordingGlow.cgColor
+        dot.fillColor = DockPaint.recordingRed.cgColor
+        dot.shadowColor = DockPaint.recordingGlow.cgColor
         dot.shadowOpacity = 1
         dot.shadowRadius = 6
         dot.shadowOffset = .zero
@@ -129,7 +127,7 @@ final class RecordingPanel {
         // Monospaced elapsed timer.
         let label = NSTextField(labelWithString: "0:00")
         label.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-        label.textColor = Self.textPrimary
+        label.textColor = DockPaint.textPrimary
         label.frame = NSRect(x: x, y: (height - 20) / 2, width: timerW, height: 20)
         label.alignment = .left
         bg.addSubview(label)
@@ -149,7 +147,7 @@ final class RecordingPanel {
             metersHost.layer?.addSublayer(micBg)
             let micFill = CALayer()
             micFill.frame = CGRect(x: 0, y: 8, width: 0, height: 4)
-            micFill.backgroundColor = Self.meterMicColor.cgColor
+            micFill.backgroundColor = DockPaint.meterMic.cgColor
             micFill.cornerRadius = 2
             metersHost.layer?.addSublayer(micFill)
             self.micMeterLayer = micFill
@@ -161,7 +159,7 @@ final class RecordingPanel {
             metersHost.layer?.addSublayer(sysBg)
             let sysFill = CALayer()
             sysFill.frame = CGRect(x: 0, y: 2, width: 0, height: 4)
-            sysFill.backgroundColor = Self.meterSysColor.cgColor
+            sysFill.backgroundColor = DockPaint.meterSystem.cgColor
             sysFill.cornerRadius = 2
             metersHost.layer?.addSublayer(sysFill)
             self.sysMeterLayer = sysFill
@@ -226,8 +224,7 @@ final class RecordingPanel {
 
     private func tick() {
         guard let s = startedAt, let label = elapsedLabel else { return }
-        let dt = Int(Date().timeIntervalSince(s))
-        label.stringValue = String(format: "%d:%02d", dt / 60, dt % 60)
+        label.stringValue = BS.Format.mmss(Date().timeIntervalSince(s))
 
         if let levels = audioLevels {
             CATransaction.begin()
@@ -257,8 +254,6 @@ final class RecordingPanel {
 /// red. Custom-drawn (rather than relying on NSButton bezel) so the colour
 /// stays consistent across macOS versions.
 private final class StudioStopButton: NSButton {
-    private let baseColor = NSColor(srgbRed: 1.00, green: 0.231, blue: 0.188, alpha: 1.0)
-    private let hoverColor = NSColor(srgbRed: 1.00, green: 0.36, blue: 0.32, alpha: 1.0)
     private var isHover: Bool = false { didSet { needsDisplay = true } }
     private var trackingArea: NSTrackingArea?
 
@@ -268,7 +263,6 @@ private final class StudioStopButton: NSButton {
         bezelStyle = .regularSquare
         isBordered = false
         wantsLayer = true
-        // Force our own drawing — `isBordered = false` plus drawRect override.
     }
 
     required init?(coder: NSCoder) { super.init(coder: coder); wantsLayer = true }
@@ -289,7 +283,7 @@ private final class StudioStopButton: NSButton {
     override func draw(_ dirtyRect: NSRect) {
         let radius = bounds.height / 2
         let path = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
-        (isHover ? hoverColor : baseColor).setFill()
+        (isHover ? DockPaint.recordingHot : DockPaint.recordingRed).setFill()
         path.fill()
 
         // Top highlight — 1pt inner stroke fading from white-12% to clear.

@@ -3,20 +3,9 @@ import BaseStudioCore
 import BaseStudioRecording
 import SwiftUI
 
-/// Pre-record landing screen.
-///
-/// Studio Console aesthetic — single-column composition centred on a preview
-/// tile of *what will be captured*. Inspired by Cap / Screen Studio: less
-/// pre-flight chrome, more "this is what your recording will look like."
-///
-/// Layout (top → bottom):
-///   1. Title + subtitle (left-aligned, no centred-marketing-page vibe).
-///   2. Preview tile — display aspect-ratio tile with the webcam circle
-///      overlaid in the chosen corner. Mirrors the actual rendered output.
-///   3. Source picker chip — sits just below the tile like a caption.
-///   4. Pill-row of capture toggles — webcam / system audio / mic.
-///   5. Big primary record CTA + keyboard hint.
-///   6. Library summary (subtle).
+/// Pre-record landing screen — single column centred on a preview tile of
+/// *what will be captured*. Inspired by Cap / Screen Studio: less pre-flight
+/// chrome, more "this is what your recording will look like."
 struct HomeView: View {
     @ObservedObject var vm: RecordingViewModel
     @ObservedObject var webcamPreview: WebcamPreviewSession
@@ -25,7 +14,6 @@ struct HomeView: View {
     var body: some View {
         HStack(spacing: 0) {
             RecordingsListView(vm: vm)
-            Divider().opacity(0.0) // hairline already provided by RecordingsListView background
 
             ScrollView {
                 VStack(alignment: .leading, spacing: BS.Space.section) {
@@ -52,7 +40,6 @@ struct HomeView: View {
 
     private var titleArea: some View {
         HStack(alignment: .center, spacing: BS.Space.snug) {
-            // 2pt amber accent rule — "lit" indicator next to the title.
             RoundedRectangle(cornerRadius: 1, style: .continuous)
                 .fill(BS.Color.accent)
                 .frame(width: 3, height: 36)
@@ -72,8 +59,7 @@ struct HomeView: View {
     // MARK: - Preview tile (display aspect-ratio + webcam overlay)
 
     private var previewTile: some View {
-        // Aspect ratio of the selected display (or sane default 16:9).
-        let aspect = currentAspect
+        let target = resolvedTarget
         return ZStack(alignment: webcamCornerAlignment) {
             // Tile background — soft graphite gradient, hairline border.
             RoundedRectangle(cornerRadius: BS.Radius.panel, style: .continuous)
@@ -113,13 +99,13 @@ struct HomeView: View {
                 )
 
                 VStack(spacing: BS.Space.snug) {
-                    Image(systemName: targetGlyph)
+                    Image(systemName: target.glyph)
                         .font(.system(size: 44, weight: .ultraLight))
                         .foregroundStyle(BS.Color.textSecondary)
-                    Text(targetTitle)
+                    Text(target.title)
                         .font(BS.Font.labelStrong)
                         .foregroundStyle(BS.Color.textPrimary)
-                    Text(targetSubtitle)
+                    Text(target.subtitle)
                         .font(BS.Font.mono)
                         .foregroundStyle(BS.Color.textTertiary)
                 }
@@ -132,58 +118,49 @@ struct HomeView: View {
                     .padding(BS.Space.regular)
             }
         }
-        .aspectRatio(aspect, contentMode: .fit)
+        .aspectRatio(target.aspect, contentMode: .fit)
         .frame(maxWidth: .infinity)
     }
 
-    private var currentAspect: CGFloat {
-        switch vm.selectedTarget {
-        case .display(let id):
-            if let d = vm.displays.first(where: { $0.id == id }) {
-                return CGFloat(d.widthPx) / CGFloat(d.heightPx)
-            }
-        case .window(let id):
-            if let w = vm.windows.first(where: { $0.id == id }), w.widthPx > 0, w.heightPx > 0 {
-                return CGFloat(w.widthPx) / CGFloat(w.heightPx)
-            }
-        case .none:
-            break
-        }
-        return 16.0 / 9.0
+    /// Single resolved view of the active capture target. Computed once
+    /// from `vm.selectedTarget` + the display/window lists, so the four
+    /// label fields below don't each re-walk the lists per body re-eval.
+    private struct TargetInfo {
+        let glyph: String
+        let title: String
+        let subtitle: String
+        let aspect: CGFloat
     }
 
-    private var targetGlyph: String {
-        switch vm.selectedTarget {
-        case .window: return "macwindow"
-        case .display, .none: return "display"
-        }
-    }
-    private var targetTitle: String {
+    private var resolvedTarget: TargetInfo {
+        let fallbackAspect: CGFloat = 16.0 / 9.0
         switch vm.selectedTarget {
         case .display(let id):
             if let d = vm.displays.first(where: { $0.id == id }) {
-                return d.isMain ? "Main Display" : d.label
+                return .init(
+                    glyph: "display",
+                    title: d.isMain ? "Main Display" : d.label,
+                    subtitle: "\(d.widthPx) × \(d.heightPx)",
+                    aspect: CGFloat(d.widthPx) / CGFloat(d.heightPx)
+                )
             }
-            return "Display"
-        case .window(let id):
-            if let w = vm.windows.first(where: { $0.id == id }) { return w.label }
-            return "Window"
-        case .none: return "Choose source"
-        }
-    }
-    private var targetSubtitle: String {
-        switch vm.selectedTarget {
-        case .display(let id):
-            if let d = vm.displays.first(where: { $0.id == id }) {
-                return "\(d.widthPx) × \(d.heightPx)"
-            }
+            return .init(glyph: "display", title: "Display", subtitle: "", aspect: fallbackAspect)
         case .window(let id):
             if let w = vm.windows.first(where: { $0.id == id }) {
-                return "\(w.widthPx) × \(w.heightPx)"
+                let aspect: CGFloat = (w.widthPx > 0 && w.heightPx > 0)
+                    ? CGFloat(w.widthPx) / CGFloat(w.heightPx)
+                    : fallbackAspect
+                return .init(
+                    glyph: "macwindow",
+                    title: w.label,
+                    subtitle: "\(w.widthPx) × \(w.heightPx)",
+                    aspect: aspect
+                )
             }
-        case .none: return "—"
+            return .init(glyph: "macwindow", title: "Window", subtitle: "", aspect: fallbackAspect)
+        case .none:
+            return .init(glyph: "display", title: "Choose source", subtitle: "—", aspect: fallbackAspect)
         }
-        return ""
     }
 
     // MARK: - Webcam overlay (lives inside the preview tile)
@@ -255,7 +232,7 @@ struct HomeView: View {
 
     private var sourceCaption: some View {
         HStack(spacing: BS.Space.tight) {
-            Image(systemName: targetGlyph)
+            Image(systemName: resolvedTarget.glyph)
                 .font(.system(size: 11))
                 .foregroundStyle(BS.Color.textTertiary)
             Picker("", selection: Binding(
@@ -358,14 +335,7 @@ struct HomeView: View {
                 }
                 .padding(.horizontal, BS.Space.section)
                 .padding(.vertical, BS.Space.snug + 2)
-                .background(
-                    BS.Color.accentGradient,
-                    in: RoundedRectangle(cornerRadius: BS.Radius.card, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: BS.Radius.card, style: .continuous)
-                        .strokeBorder(BS.Color.topHighlight, lineWidth: 1)
-                )
+                .bsAccentButton(radius: BS.Radius.card)
                 .foregroundStyle(BS.Color.onAccent)
                 .shadow(color: BS.Color.accent.opacity(0.35), radius: 18, x: 0, y: 6)
                 .opacity(vm.canStartRecording ? 1.0 : 0.45)

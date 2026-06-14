@@ -49,7 +49,7 @@ crisp captions, without ever opening a separate editor.
 The shortest path on a Mac with Xcode 15+ installed:
 
 ```bash
-git clone <this repo>
+git clone https://github.com/yayashuxue/base-studio.git
 cd base-studio
 ./scripts/build-app.sh           # builds + signs build/Base Studio.app
 open "build/Base Studio.app"
@@ -67,6 +67,14 @@ open "build/Base Studio.app"
 The first run will prompt for **Screen Recording**, **Camera**, **Microphone**,
 and **Input Monitoring** (for the global click monitor). Recordings live at
 `~/Library/Application Support/BaseStudio/Recordings/`.
+
+### Known issue
+
+The permission flow is still rough. Some local builds may continue to show
+audio/video access prompts after access has been granted and the app has been
+restarted. Use the bundled app path above, prefer a stable signing identity,
+and treat repeated permission prompts as an active bug rather than expected
+behavior.
 
 ### Without the bundle
 

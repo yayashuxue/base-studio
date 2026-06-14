@@ -39,7 +39,7 @@ fi
 # granted permissions across rebuilds), then a self-signed cert, then ad-hoc.
 APPLE_DEV_ID=$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -E '"Apple Development:|"Apple Distribution:|"Developer ID Application:' \
-    | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
 SELF_SIGNED_NAME="Base Studio Dev"
 
 # Hardened-runtime device entitlements. Required so AVCaptureDevice can

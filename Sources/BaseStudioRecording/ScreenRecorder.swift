@@ -7,6 +7,8 @@ import ScreenCaptureKit
 public enum ScreenRecorderError: Error, LocalizedError {
     case noDisplay
     case writerSetupFailed(String)
+    case writerFailed(String)
+    case noFramesWritten
     case alreadyRunning
     case notRunning
     case screenRecordingDenied
@@ -17,6 +19,10 @@ public enum ScreenRecorderError: Error, LocalizedError {
             return "No display available."
         case .writerSetupFailed(let msg):
             return "Writer setup failed: \(msg)"
+        case .writerFailed(let msg):
+            return "Screen recording failed while writing video: \(msg)"
+        case .noFramesWritten:
+            return "Screen recording failed because no video frames were written."
         case .alreadyRunning:
             return "Screen recorder is already running."
         case .notRunning:
@@ -72,6 +78,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var screenFramesFiltered: Int = 0
     private var screenFramesNotReady: Int = 0
     private var screenFramesAppended: Int = 0
+    private var screenAppendFailures: Int = 0
+    private var firstAppendFailure: String?
     private var audioBuffersReceived: Int = 0
     private var audioBuffersNonSilent: Int = 0
     private var displayID: UInt32 = 0
@@ -171,8 +179,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                     .uint32Value == display.displayID
             }
             scale = Double(nsScreen?.backingScaleFactor ?? 2.0)
-            widthPx = Int(Double(display.width) * scale)
-            heightPx = Int(Double(display.height) * scale)
+            // SCDisplay dimensions are already physical pixels. Multiplying
+            // them by backingScaleFactor double-sizes Retina displays and can
+            // exceed VideoToolbox's H.264 limits, producing -12785 append
+            // failures and 0-byte/36-byte screen.mov files.
+            widthPx = display.width
+            heightPx = display.height
             filter = SCContentFilter(display: display, excludingWindows: [])
             self.displayOriginPt = nsScreen?.frame.origin ?? .zero
             self.displaySizePt = nsScreen?.frame.size
@@ -266,6 +278,14 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.firstPTS = nil
         self.firstAudioPTS = nil
         self.lastPTS = nil
+        self.screenFramesReceived = 0
+        self.screenFramesFiltered = 0
+        self.screenFramesNotReady = 0
+        self.screenFramesAppended = 0
+        self.screenAppendFailures = 0
+        self.audioBuffersReceived = 0
+        self.audioBuffersNonSilent = 0
+        self.firstAppendFailure = nil
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
@@ -286,11 +306,24 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         audioInput?.markAsFinished()
         await writer.finishWriting()
         BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
+        let writerStatus = writer.status
+        let writerError = writer.error
         self.stream = nil
         self.writer = nil
         self.videoInput = nil
         self.audioInput = nil
         self.isRunning = false
+
+        if writerStatus == .failed || writerStatus == .cancelled {
+            throw ScreenRecorderError.writerFailed(
+                firstAppendFailure
+                ?? writerError?.localizedDescription
+                ?? "AVAssetWriter ended with status \(writerStatus.rawValue)"
+            )
+        }
+        guard screenFramesAppended > 0 else {
+            throw ScreenRecorderError.noFramesWritten
+        }
 
         let first = firstPTS ?? .zero
         let last = lastPTS ?? .zero
@@ -352,9 +385,16 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             }
             lastPTS = pts
             let ok = videoInput.append(sampleBuffer)
-            screenFramesAppended += 1
             if !ok {
-                BSLog.error("append failed, writer.error=\(String(describing: writer?.error))")
+                screenAppendFailures += 1
+                let msg = String(describing: writer?.error)
+                if firstAppendFailure == nil { firstAppendFailure = msg }
+                BSLog.error("append failed, writer.error=\(msg)")
+                return
+            }
+            screenFramesAppended += 1
+            if screenAppendFailures > 0 {
+                BSLog.warn("append recovered after \(screenAppendFailures) failures")
             }
             if screenFramesAppended % 60 == 1 {
                 BSLog.info("appended \(screenFramesAppended) frames")

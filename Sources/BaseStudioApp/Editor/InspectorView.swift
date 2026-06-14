@@ -38,14 +38,21 @@ struct InspectorView: View {
 
     // MARK: - Section header
 
-    private func sectionHeader(_ title: String, icon: String) -> some View {
-        HStack(spacing: BS.Space.tight - 2) {
+    /// `icon · UPPERCASE TITLE · spacer · optional trailing accessory` row.
+    /// Drives every inspector section header.
+    private func sectionHeader<Trailing: View>(
+        _ title: String,
+        icon: String,
+        @ViewBuilder trailing: () -> Trailing = { EmptyView() }
+    ) -> some View {
+        HStack(spacing: BS.Space.gap) {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
+                .font(BS.Font.sectionIcon)
                 .foregroundStyle(BS.Color.textTertiary)
             Text(title)
                 .bsSectionHeader()
             Spacer()
+            trailing()
         }
     }
 
@@ -91,7 +98,7 @@ struct InspectorView: View {
         VStack(alignment: .leading, spacing: BS.Space.snug) {
             sectionHeader("Export", icon: "square.and.arrow.up")
 
-            HStack(spacing: BS.Space.micro + 2) {
+            HStack(spacing: BS.Space.gap) {
                 ForEach(RecordingViewModel.ExportResolution.allCases) { res in
                     segmentedButton(
                         text: res.label,
@@ -115,7 +122,7 @@ struct InspectorView: View {
                 .font(BS.Font.caption)
                 .foregroundStyle(BS.Color.textTertiary)
                 .padding(.top, BS.Space.micro)
-            HStack(spacing: BS.Space.micro + 2) {
+            HStack(spacing: BS.Space.gap) {
                 ForEach(RecordingViewModel.ExportAudio.allCases) { mode in
                     Button(action: { vm.exportAudio = mode }) {
                         VStack(spacing: 2) {
@@ -150,13 +157,7 @@ struct InspectorView: View {
     @ViewBuilder
     private func selectedRegionSection(_ region: ZoomRegion) -> some View {
         VStack(alignment: .leading, spacing: BS.Space.snug) {
-            HStack(spacing: BS.Space.tight - 2) {
-                Image(systemName: "scope")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(BS.Color.textTertiary)
-                Text("Zoom Region")
-                    .bsSectionHeader()
-                Spacer()
+            sectionHeader("Zoom Region", icon: "scope") {
                 Button(action: { state.deleteZoomRegion(region.id) }) {
                     Image(systemName: "trash")
                         .font(.system(size: 11))
@@ -167,7 +168,7 @@ struct InspectorView: View {
             }
 
             valueRow(label: "Scale", value: String(format: "%.2f×", region.scale))
-            HStack(spacing: BS.Space.micro + 2) {
+            HStack(spacing: BS.Space.gap) {
                 ForEach([1.2, 1.4, 1.6, 1.8, 2.0, 2.5], id: \.self) { v in
                     segmentedButton(
                         text: String(format: "%.1f×", v),
@@ -190,7 +191,7 @@ struct InspectorView: View {
             .tint(BS.Color.accent)
 
             valueRow(label: "Speed", value: String(format: "%.1f×", region.speed))
-            HStack(spacing: BS.Space.micro + 2) {
+            HStack(spacing: BS.Space.gap) {
                 ForEach([1.0, 1.2, 1.4, 1.6, 1.8, 2.0], id: \.self) { v in
                     segmentedButton(
                         text: v == 1.0 ? "1×" : String(format: "%.1f×", v),
@@ -217,13 +218,7 @@ struct InspectorView: View {
     @ViewBuilder
     private func nodeSection(for inst: NodeInstance) -> some View {
         VStack(alignment: .leading, spacing: BS.Space.snug) {
-            HStack(spacing: BS.Space.tight - 2) {
-                Image(systemName: nodeIcon(for: inst.nodeType))
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(BS.Color.textTertiary)
-                Text(displayName(for: inst.nodeType))
-                    .bsSectionHeader()
-                Spacer()
+            sectionHeader(displayName(for: inst.nodeType), icon: nodeIcon(for: inst.nodeType)) {
                 Toggle("", isOn: Binding(
                     get: { inst.enabled },
                     set: { state.setNodeEnabled(instanceID: inst.instanceID, $0) }
@@ -289,11 +284,9 @@ struct InspectorView: View {
 
     @ViewBuilder
     private func backgroundControls(_ inst: NodeInstance) -> some View {
-        // Five gradient presets + every image you've ever uploaded + a "+" tile
-        // for new uploads. Image uploads live in a global library
-        // (~/Library/Application Support/BaseStudio/Backgrounds/) so they show
-        // up across recordings, not just this one. Per julie: "保持简化丝滑的UX —
-        // 几个图就好，可以upload."
+        // Image uploads live in a global library so they show up across
+        // recordings, not just this one. Path: ~/Library/Application
+        // Support/BaseStudio/Backgrounds/.
         let bgImage = state.project.backgroundImageRel
         let curTop = inst.bindings["bgTop"]?.constantValue
         let uploads = BackgroundImageStore.list()
@@ -327,7 +320,7 @@ struct InspectorView: View {
             Button(action: pickBackgroundImage) {
                 bgTile(selected: false) {
                     tileShape()
-                        .fill(Color.white.opacity(0.04))
+                        .fill(BS.Color.divider)
                         .overlay(
                             Image(systemName: "plus")
                                 .font(.system(size: 14, weight: .medium))
@@ -513,7 +506,7 @@ struct InspectorView: View {
                     .font(BS.Font.caption)
                     .foregroundStyle(BS.Color.textSecondary)
                 Button(action: { state.generateCaptions() }) {
-                    HStack(spacing: BS.Space.tight - 2) {
+                    HStack(spacing: BS.Space.gap) {
                         if state.isTranscribing {
                             ProgressView().controlSize(.small)
                             Text("Transcribing…")
@@ -523,19 +516,9 @@ struct InspectorView: View {
                         }
                     }
                     .font(BS.Font.labelStrong)
-                    .foregroundStyle(Color(hex: 0x1A1102))
+                    .foregroundStyle(BS.Color.onAccent)
                     .frame(maxWidth: .infinity, minHeight: 30)
-                    .background(
-                        RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                            .fill(LinearGradient(
-                                colors: [BS.Color.accent, BS.Color.accent.opacity(0.82)],
-                                startPoint: .top, endPoint: .bottom
-                            ))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                            .strokeBorder(BS.Color.topHighlight, lineWidth: 1)
-                    )
+                    .bsAccentButton()
                 }
                 .buttonStyle(.plain)
                 .disabled(state.isTranscribing)

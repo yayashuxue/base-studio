@@ -217,6 +217,20 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         refreshLibrary()
     }
 
+    func revealLastBundle() {
+        guard let lastBundle else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([lastBundle.url])
+    }
+
+    func deleteLastBundle() {
+        guard let lastBundle else { return }
+        try? FileManager.default.removeItem(at: lastBundle.url)
+        if editorState?.bundleURL == lastBundle.url { editorState = nil }
+        self.lastBundle = nil
+        phase = .idle
+        refreshLibrary()
+    }
+
     func renameRecording(_ entry: RecordingsLibrary.Entry, to newName: String) {
         guard let newURL = try? RecordingsLibrary.rename(entry, to: newName) else {
             refreshLibrary(); return
@@ -329,10 +343,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                     self?.loadEditor(for: bundle)
                     self?.refreshLibrary()
                     // Webcam preview lifecycle is driven by ContentView's
-                    // `shouldRunWebcamPreview` gate. Restarting here would
-                    // re-light the camera LED while the user is in the editor
-                    // — exactly the bug julie hit. The gate restarts the
-                    // preview when the user navigates back to Home.
+                    // `shouldRunWebcamPreview` gate (Home + includeWebcam + idle
+                    // phase). After stop we transition into the editor, so the
+                    // gate naturally keeps the camera off until the user
+                    // navigates back to Home.
                 }
             } catch {
                 await MainActor.run {

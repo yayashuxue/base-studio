@@ -53,8 +53,8 @@ final class MenuBarController {
 
     private func tickTitle() {
         guard let startedAt, let button = statusItem?.button else { return }
-        let dt = Int(Date().timeIntervalSince(startedAt))
-        button.title = String(format: " %d:%02d  Stop ", dt / 60, dt % 60)
+        let elapsed = BS.Format.mmss(Date().timeIntervalSince(startedAt))
+        button.title = " \(elapsed)  Stop "
     }
 
     @objc private func stopAction(_ sender: Any?) {

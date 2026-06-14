@@ -19,14 +19,21 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 topBar
-                hairline
+                BSHairline()
                 if let editor = vm.editorState {
                     editorPane(editor)
+                } else if case .failed(let message) = vm.phase, let bundle = vm.lastBundle {
+                    BrokenBundleCard(
+                        bundle: bundle,
+                        message: message,
+                        onReveal: vm.revealLastBundle,
+                        onDelete: vm.deleteLastBundle
+                    )
                 } else {
                     welcomePane
                 }
                 if vm.exportPhase != .none {
-                    hairline
+                    BSHairline()
                     exportBar.padding(BS.Space.snug)
                         .background(BS.Color.surface)
                 }
@@ -78,13 +85,9 @@ struct ContentView: View {
         .background(.ultraThinMaterial)
     }
 
-    private var hairline: some View {
-        Rectangle().fill(BS.Color.hairline).frame(height: 1)
-    }
-
     private var homeButton: some View {
         Button(action: { vm.editorState = nil }) {
-            HStack(spacing: BS.Space.tight - 2) {
+            HStack(spacing: BS.Space.gap) {
                 Image(systemName: "house.fill")
                     .font(.system(size: 11, weight: .medium))
                 Text("Home")
@@ -92,22 +95,15 @@ struct ContentView: View {
             }
             .foregroundStyle(BS.Color.textPrimary)
             .padding(.horizontal, BS.Space.snug)
-            .padding(.vertical, BS.Space.tight - 2)
-            .background(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .fill(BS.Color.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .strokeBorder(BS.Color.hairline, lineWidth: 1)
-            )
+            .padding(.vertical, BS.Space.gap)
+            .bsSelectableTile(isOn: false)
         }
         .buttonStyle(.plain)
     }
 
     private var exportButton: some View {
         Button(action: vm.polishAndExport) {
-            HStack(spacing: BS.Space.tight - 2) {
+            HStack(spacing: BS.Space.gap) {
                 Image(systemName: "wand.and.stars")
                     .font(.system(size: 11, weight: .semibold))
                 Text("Export")
@@ -115,15 +111,8 @@ struct ContentView: View {
             }
             .foregroundStyle(BS.Color.onAccent)
             .padding(.horizontal, BS.Space.snug)
-            .padding(.vertical, BS.Space.tight - 2)
-            .background(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .fill(BS.Color.accentGradient)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: BS.Radius.chip, style: .continuous)
-                    .strokeBorder(BS.Color.topHighlight, lineWidth: 1)
-            )
+            .padding(.vertical, BS.Space.gap)
+            .bsAccentButton()
         }
         .buttonStyle(.plain)
         .disabled(isExportingNow)
@@ -141,9 +130,9 @@ struct ContentView: View {
     }
 
     /// True only on Home with webcam toggled on, outside of an active capture.
-    /// Mirrors `shouldRunScreenPreview` — without this gate the camera LED
-    /// stayed lit after stop because the post-recording editor view kept the
-    /// preview session alive (and stopRecording explicitly restarted it).
+    /// Same shape as `shouldRunScreenPreview` — without this gate the camera
+    /// LED stayed lit after stop because the post-recording editor view kept
+    /// the preview session alive.
     private var shouldRunWebcamPreview: Bool {
         guard vm.includeWebcam else { return false }
         guard vm.editorState == nil else { return false }
@@ -153,12 +142,6 @@ struct ContentView: View {
         }
     }
 
-    private var canRecord: Bool {
-        switch vm.phase {
-        case .idle, .done, .failed: return true
-        case .countingDown, .recording, .finalizing: return false
-        }
-    }
     private var isExportingNow: Bool {
         if case .running = vm.exportPhase { return true }
         return false
@@ -170,57 +153,33 @@ struct ContentView: View {
         case .idle:
             EmptyView()
         case .countingDown:
-            HStack(spacing: BS.Space.tight - 2) {
+            statusChip(label: "Starting…", color: BS.Color.recordingRed) {
                 ProgressView().controlSize(.small).tint(BS.Color.recordingRed)
-                Text("Starting…")
-                    .font(BS.Font.label)
-                    .foregroundStyle(BS.Color.recordingRed)
             }
         case .recording:
-            HStack(spacing: BS.Space.tight - 2) {
+            statusChip(label: "Recording", color: BS.Color.recordingRed, font: BS.Font.labelStrong) {
                 Circle().fill(BS.Color.recordingRed)
                     .frame(width: 8, height: 8)
                     .shadow(color: BS.Color.recordingGlow, radius: 4)
-                Text("Recording")
-                    .font(BS.Font.labelStrong)
-                    .foregroundStyle(BS.Color.recordingRed)
             }
         case .finalizing:
-            HStack(spacing: BS.Space.tight - 2) {
+            statusChip(label: "Finalizing…", color: BS.Color.textSecondary) {
                 ProgressView().controlSize(.small).tint(BS.Color.textSecondary)
-                Text("Finalizing…")
-                    .font(BS.Font.label)
-                    .foregroundStyle(BS.Color.textSecondary)
             }
         case .done:
-            HStack(spacing: BS.Space.tight - 2) {
+            statusChip(label: "Ready to edit", color: BS.Color.statusOk) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(BS.Color.statusOk)
-                Text("Ready to edit")
-                    .font(BS.Font.label)
-                    .foregroundStyle(BS.Color.statusOk)
             }
-        case .failed(let m):
-            HStack(spacing: BS.Space.tight) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(BS.Color.statusWarn)
-                Text(m)
-                    .font(BS.Font.caption)
-                    .foregroundStyle(BS.Color.recordingRed)
-                    .lineLimit(2)
-                if m.contains("permission") || m.contains("Privacy") || m.contains("relaunch") {
-                    let lower = m.lowercased()
-                    let anchor: String = {
-                        if lower.contains("camera") || lower.contains("webcam") {
-                            return "Privacy_Camera"
-                        } else if lower.contains("microphone") || lower.contains("mic ") || lower.contains("audio") {
-                            return "Privacy_Microphone"
-                        } else {
-                            return "Privacy_ScreenCapture"
-                        }
-                    }()
+        case .failed(let message):
+            if isPermissionFailure(message) {
+                HStack(spacing: BS.Space.tight) {
+                    statusChip(label: "Permission needed", color: BS.Color.statusWarn) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(BS.Color.statusWarn)
+                    }
                     Button("Open Settings") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(settingsAnchor(for: message))") {
                             NSWorkspace.shared.open(url)
                         }
                     }
@@ -232,7 +191,43 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
+            } else {
+                statusChip(label: "Couldn't open recording", color: BS.Color.statusWarn) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(BS.Color.statusWarn)
+                }
             }
+        }
+    }
+
+    private func isPermissionFailure(_ message: String) -> Bool {
+        message.contains("permission")
+            || message.contains("Privacy")
+            || message.contains("relaunch")
+    }
+
+    private func settingsAnchor(for message: String) -> String {
+        let lower = message.lowercased()
+        if lower.contains("camera") || lower.contains("webcam") {
+            return "Privacy_Camera"
+        }
+        if lower.contains("microphone") || lower.contains("mic ") || lower.contains("audio") {
+            return "Privacy_Microphone"
+        }
+        return "Privacy_ScreenCapture"
+    }
+
+    /// Shared `[leading icon · label]` chip used by the compact top-bar states.
+    @ViewBuilder
+    private func statusChip<Leading: View>(
+        label: String,
+        color: Color,
+        font: Font = BS.Font.label,
+        @ViewBuilder leading: () -> Leading
+    ) -> some View {
+        HStack(spacing: BS.Space.gap) {
+            leading()
+            Text(label).font(font).foregroundStyle(color)
         }
     }
 
@@ -265,13 +260,12 @@ struct ContentView: View {
     private func editorPane(_ editor: EditorState) -> some View {
         HStack(spacing: 0) {
             RecordingsListView(vm: vm)
-            verticalDivider
+            BSHairline(axis: .vertical)
 
-            // Center column: canvas + scrubber + timeline.
             VStack(spacing: 0) {
                 EngineCanvasView(state: editor)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                hairline
+                BSHairline()
                 VStack(spacing: BS.Space.tight) {
                     ScrubberView(state: editor)
                     TimelineView(state: editor)
@@ -282,16 +276,12 @@ struct ContentView: View {
                 .background(BS.Color.surface.opacity(0.55))
             }
 
-            verticalDivider
+            BSHairline(axis: .vertical)
 
             InspectorView(state: editor, vm: vm)
                 .frame(width: 300)
                 .background(BS.Color.surface.opacity(0.65))
         }
-    }
-
-    private var verticalDivider: some View {
-        Rectangle().fill(BS.Color.hairline).frame(width: 1)
     }
 
     @ViewBuilder

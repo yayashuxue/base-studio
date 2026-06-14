@@ -103,7 +103,7 @@ private struct RecordingRow: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, BS.Space.tight + 2)
-            .padding(.vertical, BS.Space.tight - 2)
+            .padding(.vertical, BS.Space.gap)
             .background(rowBackground)
             .overlay(rowBorder)
         }
