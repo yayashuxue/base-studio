@@ -12,7 +12,11 @@ set -euo pipefail
 CERT_NAME="Base Studio Dev"
 KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning "${KEYCHAIN}" 2>/dev/null \
+# Use find-identity WITHOUT `-v`: the cert is self-signed and therefore
+# untrusted, so `-v` (valid-only) never lists it and the script would re-import
+# a duplicate on every run. Matching all codesigning identities keeps this
+# genuinely idempotent.
+if security find-identity -p codesigning "${KEYCHAIN}" 2>/dev/null \
         | grep -q "\"${CERT_NAME}\""; then
     echo "✓ Cert '${CERT_NAME}' already exists in login keychain — nothing to do."
     exit 0

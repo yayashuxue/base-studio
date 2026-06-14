@@ -41,6 +41,13 @@ APPLE_DEV_ID=$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -E '"Apple Development:|"Apple Distribution:|"Developer ID Application:' \
     | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
 SELF_SIGNED_NAME="Base Studio Dev"
+# Find the self-signed dev cert WITHOUT the `-v` (valid-only) filter: a
+# self-signed cert is untrusted by Gatekeeper, so `-v` hides it — but TCC keys
+# permission persistence on the signing identity's designated requirement, not
+# on trust, so an untrusted-but-stable cert is exactly what we want locally.
+# Match by SHA-1 hash to stay unambiguous even if duplicates exist.
+SELF_SIGNED_HASH=$(security find-identity -p codesigning 2>/dev/null \
+    | grep "\"${SELF_SIGNED_NAME}\"" | head -1 | awk '{print $2}' || true)
 
 # Hardened-runtime device entitlements. Required so AVCaptureDevice can
 # actually open the camera / microphone — without these the OS silently
@@ -60,10 +67,9 @@ if [[ -n "${APPLE_DEV_ID}" ]]; then
         --options runtime \
         --entitlements "${ENTITLEMENTS}" \
         "${APP}" >/dev/null
-elif security find-identity -v -p codesigning 2>/dev/null \
-        | grep -q "\"${SELF_SIGNED_NAME}\""; then
-    echo "→ Signing with '${SELF_SIGNED_NAME}' (stable self-signed identity)"
-    codesign --force --deep --sign "${SELF_SIGNED_NAME}" \
+elif [[ -n "${SELF_SIGNED_HASH}" ]]; then
+    echo "→ Signing with '${SELF_SIGNED_NAME}' (stable self-signed identity ${SELF_SIGNED_HASH})"
+    codesign --force --deep --sign "${SELF_SIGNED_HASH}" \
         --identifier com.basestudio.dev \
         --options runtime \
         --entitlements "${ENTITLEMENTS}" \
