@@ -66,12 +66,12 @@ final class RecordingPanel {
 
         let panel = NSPanel(
             contentRect: NSRect(origin: origin, size: size),
-            styleMask: [.borderless, .nonactivatingPanel, .utilityWindow, .hudWindow],
+            styleMask: [.borderless, .nonactivatingPanel, .utilityWindow],
             backing: .buffered, defer: false
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = true
@@ -87,6 +87,7 @@ final class RecordingPanel {
         bg.wantsLayer = true
         bg.layer?.cornerRadius = BS.Radius.dock
         bg.layer?.masksToBounds = true
+        bg.layer?.borderWidth = 0
 
         // 1pt top inner highlight — "lit from above".
         let highlight = CAGradientLayer()
@@ -262,10 +263,17 @@ private final class StudioStopButton: NSButton {
         title = ""
         bezelStyle = .regularSquare
         isBordered = false
+        focusRingType = .none
         wantsLayer = true
     }
 
-    required init?(coder: NSCoder) { super.init(coder: coder); wantsLayer = true }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        focusRingType = .none
+        wantsLayer = true
+    }
+
+    override var acceptsFirstResponder: Bool { false }
 
     override func updateTrackingAreas() {
         if let t = trackingArea { removeTrackingArea(t) }

@@ -57,6 +57,18 @@ final class WebcamPreviewSession: ObservableObject {
         permissionDenied = false
     }
 
+    func stopAndWait() async {
+        guard isRunning || session.isRunning else {
+            permissionDenied = false
+            return
+        }
+        let captureSession = session
+        await Task.detached { captureSession.stopRunning() }.value
+        isRunning = false
+        // Clear any latched denial so the next start re-checks fresh.
+        permissionDenied = false
+    }
+
     private func configure() {
         session.beginConfiguration()
         if session.canSetSessionPreset(.medium) {

@@ -7,6 +7,7 @@ import Foundation
 /// to choose the right "Open Settings" pane.
 public enum RecordingSessionError: LocalizedError {
     case cameraPermissionDenied
+    case webcamUnavailable(String)
     case alreadyRunning
     case notRunning
     case missingBundle
@@ -15,6 +16,8 @@ public enum RecordingSessionError: LocalizedError {
         switch self {
         case .cameraPermissionDenied:
             return "Camera permission denied — enable it in System Settings → Privacy & Security → Camera, then try again."
+        case .webcamUnavailable(let detail):
+            return "Webcam could not start: \(detail). Turn off Webcam or quit other camera apps, then try again."
         case .alreadyRunning:
             return "A recording is already in progress."
         case .notRunning:
@@ -128,9 +131,15 @@ public final class RecordingSession {
                 state = .idle
                 throw RecordingSessionError.cameraPermissionDenied
             } catch {
-                // Non-permission webcam failures (e.g. no device attached)
-                // remain a soft warning — recording proceeds without webcam.
-                BSLog.warn("webcam start failed: \(error)")
+                // If the user left Webcam enabled, losing that track silently
+                // is worse than failing early: the recording appears to
+                // succeed, but the webcam is missing. Surface a visible error
+                // and let the user turn Webcam off if they want screen-only.
+                BSLog.error("webcam start failed — aborting recording: \(error)")
+                _ = cursorRecorder.stop()
+                if options.includeMic { _ = await micRecorder.stop() }
+                state = .idle
+                throw RecordingSessionError.webcamUnavailable(String(describing: error))
             }
         }
 

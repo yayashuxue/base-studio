@@ -86,7 +86,13 @@ struct ContentView: View {
     }
 
     private var homeButton: some View {
-        Button(action: { vm.editorState = nil }) {
+        Button(action: {
+            vm.editorState = nil
+            if vm.includeWebcam {
+                Task { await webcamPreview.startIfPossible() }
+            }
+            screenPreview.start()
+        }) {
             HStack(spacing: BS.Space.gap) {
                 Image(systemName: "house.fill")
                     .font(.system(size: 11, weight: .medium))

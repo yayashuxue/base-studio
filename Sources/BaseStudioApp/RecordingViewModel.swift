@@ -285,7 +285,9 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             // 3 seconds of every recording — the exact thing julie hit in #2.
             self.hiddenWindow?.orderOut(nil)
             self.countdown.run(seconds: 3) { [weak self] in
-                self?.beginCapture()
+                Task { @MainActor [weak self] in
+                    await self?.beginCapture()
+                }
             }
         }
     }
@@ -341,12 +343,12 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         }
     }
 
-    private func beginCapture() {
+    private func beginCapture() async {
         guard #available(macOS 13.0, *) else { return }
         // Release the camera from the home preview before WebcamRecorder opens it.
         // Two AVCaptureSessions on the same camera collide → AVError -11800 / hang.
         if includeWebcam {
-            webcamPreview?.stop()
+            await webcamPreview?.stopAndWait()
         }
         let session = RecordingSession(options: .init(
             includeWebcam: includeWebcam,

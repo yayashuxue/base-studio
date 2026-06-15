@@ -301,6 +301,10 @@ struct HomeView: View {
                 title: "Microphone", systemImage: "mic.fill",
                 isOn: $vm.includeMic
             )
+            optionPill(
+                title: "Stop dock", systemImage: "stop.circle.fill",
+                isOn: $vm.showFloatingPanel
+            )
             Spacer()
         }
     }
