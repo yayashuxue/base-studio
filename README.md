@@ -68,6 +68,12 @@ The first run will prompt for **Screen Recording**, **Camera**, **Microphone**,
 and **Input Monitoring** (for the global click monitor). Recordings live at
 `~/Library/Application Support/BaseStudio/Recordings/`.
 
+### Recording controls
+
+- Start recording: `Command-R` from the Home screen.
+- Stop recording: menu-bar Stop, floating Stop panel, or `Command-Shift-.`.
+- Pause/resume while recording is not implemented yet. See issue #2.
+
 ### Known issue
 
 The permission flow is still rough. Some local builds may continue to show
