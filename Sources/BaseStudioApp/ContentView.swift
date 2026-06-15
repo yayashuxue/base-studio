@@ -88,9 +88,6 @@ struct ContentView: View {
     private var homeButton: some View {
         Button(action: {
             vm.editorState = nil
-            if vm.includeWebcam {
-                Task { await webcamPreview.startIfPossible() }
-            }
             screenPreview.start()
         }) {
             HStack(spacing: BS.Space.gap) {
@@ -135,12 +132,12 @@ struct ContentView: View {
         }
     }
 
-    /// True only on Home with webcam toggled on, outside of an active capture.
-    /// Same shape as `shouldRunScreenPreview` — without this gate the camera
-    /// LED stayed lit after stop because the post-recording editor view kept
-    /// the preview session alive.
+    /// True only on Home after explicit webcam preview opt-in, outside of an
+    /// active capture. `includeWebcam` means record the camera track; it should
+    /// not access the camera just because the idle app is open.
     private var shouldRunWebcamPreview: Bool {
         guard vm.includeWebcam else { return false }
+        guard vm.showWebcamPreview else { return false }
         guard vm.editorState == nil else { return false }
         switch vm.phase {
         case .recording, .finalizing, .countingDown: return false

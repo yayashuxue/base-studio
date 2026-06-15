@@ -177,7 +177,9 @@ struct HomeView: View {
             Circle()
                 .fill(BS.Color.surface)
                 .overlay(Circle().stroke(BS.Color.hairline, lineWidth: 1))
-            if webcamPreview.permissionDenied {
+            if !vm.showWebcamPreview {
+                webcamPreviewOffBadge(size: size)
+            } else if webcamPreview.permissionDenied {
                 webcamDeniedBadge(size: size)
             } else if webcamPreview.isRunning {
                 WebcamPreviewView(
@@ -191,6 +193,24 @@ struct HomeView: View {
         }
         .frame(width: size, height: size)
         .shadow(color: .black.opacity(0.45), radius: 14, x: 0, y: 6)
+    }
+
+    private func webcamPreviewOffBadge(size: CGFloat) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: "video.slash.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(BS.Color.textSecondary)
+            Button {
+                vm.showWebcamPreview = true
+                Task { await webcamPreview.startIfPossible() }
+            } label: {
+                Text("Preview")
+                    .font(.system(size: 9, weight: .medium))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(BS.Color.accent)
+        }
+        .frame(width: size, height: size)
     }
 
     @ViewBuilder
@@ -215,6 +235,7 @@ struct HomeView: View {
                 .foregroundStyle(BS.Color.accent)
 
                 Button {
+                    vm.showWebcamPreview = true
                     Task { await webcamPreview.startIfPossible() }
                 } label: {
                     Text("Retry")

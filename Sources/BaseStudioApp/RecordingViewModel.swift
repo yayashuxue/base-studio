@@ -86,6 +86,9 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     // recording. Permission failures degrade gracefully (mic/webcam start
     // is wrapped in do/catch in `RecordingSession`).
     @Published var includeWebcam: Bool = true
+    // Camera preview is separate from "record webcam" and is off by default,
+    // so launching the idle app does not access the camera until requested.
+    @Published var showWebcamPreview: Bool = false
     @Published var includeSystemAudio: Bool = true
     @Published var includeMic: Bool = true
     // ON by default. The menu-bar status item can be missed or hidden behind
