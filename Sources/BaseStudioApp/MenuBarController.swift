@@ -1,8 +1,9 @@
 import AppKit
 import Foundation
 
-/// Always-visible Stop in the system menu bar. Shows `● 0:23 · Stop` text;
-/// clicking anywhere on the item stops the recording immediately (no submenu).
+/// Persistent Base Studio item in the system menu bar.
+/// Idle: compact icon that brings the app forward.
+/// Recording: red icon + timer + Stop text; click stops immediately.
 @MainActor
 final class MenuBarController {
     private var statusItem: NSStatusItem?
@@ -12,16 +13,37 @@ final class MenuBarController {
     private var localHotkeyMonitor: Any?
 
     var onStop: (() -> Void)?
+    var onShowApp: (() -> Void)?
+
+    func showIdle() {
+        elapsedTimer?.invalidate(); elapsedTimer = nil
+        removeHotkey()
+        startedAt = nil
+
+        let item = ensureStatusItem()
+        if let button = item.button {
+            button.target = self
+            button.action = #selector(itemAction(_:))
+            button.image = NSImage(
+                systemSymbolName: "video.circle.fill",
+                accessibilityDescription: "Base Studio"
+            )
+            button.image?.isTemplate = true
+            button.imagePosition = .imageOnly
+            button.contentTintColor = nil
+            button.title = ""
+            button.toolTip = "Base Studio — click to show"
+        }
+    }
 
     func show() {
-        guard statusItem == nil else { return }
         installHotkey()
         startedAt = Date()
 
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let item = ensureStatusItem()
         if let button = item.button {
             button.target = self
-            button.action = #selector(stopAction(_:))
+            button.action = #selector(itemAction(_:))
             button.image = NSImage(
                 systemSymbolName: "record.circle.fill",
                 accessibilityDescription: "Recording"
@@ -33,7 +55,6 @@ final class MenuBarController {
             button.title = " 0:00  Stop "
             button.toolTip = "Click to stop recording  (⌘⇧.)"
         }
-        statusItem = item
 
         elapsedTimer?.invalidate()
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -42,13 +63,14 @@ final class MenuBarController {
     }
 
     func hide() {
-        elapsedTimer?.invalidate(); elapsedTimer = nil
-        removeHotkey()
-        if let item = statusItem {
-            NSStatusBar.system.removeStatusItem(item)
-        }
-        statusItem = nil
-        startedAt = nil
+        showIdle()
+    }
+
+    private func ensureStatusItem() -> NSStatusItem {
+        if let statusItem { return statusItem }
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = item
+        return item
     }
 
     private func tickTitle() {
@@ -57,8 +79,12 @@ final class MenuBarController {
         button.title = " \(elapsed)  Stop "
     }
 
-    @objc private func stopAction(_ sender: Any?) {
-        onStop?()
+    @objc private func itemAction(_ sender: Any?) {
+        if startedAt != nil {
+            onStop?()
+        } else {
+            onShowApp?()
+        }
     }
 
     // MARK: - hotkey ⌘⇧.

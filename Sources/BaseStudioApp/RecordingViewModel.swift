@@ -167,6 +167,11 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     init() {
         AppDelegate.shared.stopHandler = self
         AppDelegate.shared.editorActions = self
+        menuBar.onShowApp = { [weak self] in
+            self?.restoreWindow()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        menuBar.showIdle()
         refreshLibrary()
         Task { await refreshDisplays() }
     }
