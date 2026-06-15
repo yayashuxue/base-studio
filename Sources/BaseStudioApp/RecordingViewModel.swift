@@ -88,10 +88,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     @Published var includeWebcam: Bool = true
     @Published var includeSystemAudio: Bool = true
     @Published var includeMic: Bool = true
-    // OFF by default. The menu-bar status item (red ● + Stop) and ⌘⇧.
-    // global shortcut already cover Stop reliably; the floating panel adds
-    // a visual outline that distracts from the recorded screen.
-    @Published var showFloatingPanel: Bool = false
+    // ON by default. The menu-bar status item can be missed or hidden behind
+    // notch/menu extras; the floating panel gives the user an obvious Stop
+    // affordance while recording. Users can still toggle it off per session.
+    @Published var showFloatingPanel: Bool = true
     @Published var editorState: EditorState?
     @Published var library: [RecordingsLibrary.Entry] = []
     @Published var displays: [DisplayInfo] = []
@@ -361,7 +361,8 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         menuBar.onStop = { [weak self] in self?.stopRecording() }
         menuBar.show()
 
-        // Floating panel — opt-in only.
+        // Floating Stop dock — shown by default so Stop is visible even when
+        // the menu-bar status item is hidden behind macOS menu extras.
         if showFloatingPanel {
             recordingPanel.onStop = { [weak self] in self?.stopRecording() }
             let webcamSession = (includeWebcam && webcamPreview?.isRunning == true)

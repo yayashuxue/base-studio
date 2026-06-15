@@ -71,8 +71,10 @@ and **Input Monitoring** (for the global click monitor). Recordings live at
 ### Recording controls
 
 - Start recording: `Command-R` from the Home screen.
-- Stop recording: menu-bar Stop, floating Stop panel, or `Command-Shift-.`.
-- Pause/resume while recording is not implemented yet. See issue #2.
+- Stop recording: the floating Stop dock shown during recording, the menu-bar
+  Stop item, or `Command-Shift-.`.
+- Pause/resume while recording is not implemented yet; current scope is a
+  visible Stop control.
 
 ### Known issue
 
