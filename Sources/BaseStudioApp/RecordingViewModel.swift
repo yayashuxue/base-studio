@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import BaseStudioCore
 import BaseStudioRecording
 import BaseStudioRender
@@ -260,17 +261,83 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             BSLog.warn("startRecording ignored — phase=\(phase)")
             return
         }
-        hiddenWindow = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) })
+        // Claim the in-flight slot immediately (canStartRecording → false) so
+        // rapid double-clicks / held ⌘R can't spawn a parallel session while we
+        // await the permission prompts below.
         exportPhase = .none
-        // Hide the main window NOW (before the 3-second countdown), not after
-        // it. Otherwise the app's own UI gets captured for the first 3 seconds
-        // of every recording — the exact thing julie hit in #2.
-        hiddenWindow?.orderOut(nil)
         phase = .countingDown
 
-        countdown.run(seconds: 3) { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            self.beginCapture()
+            guard #available(macOS 13.0, *) else { return }
+            // Gate on permissions BEFORE the countdown so the system prompts
+            // appear the moment the user clicks Record — never mid-recording.
+            // Mic/camera access used to be requested lazily inside
+            // RecordingSession.start() (after phase == .recording), which is why
+            // the mic prompt popped up halfway through a recording.
+            if let denied = await self.preflightPermissions() {
+                self.phase = .failed(denied)
+                return
+            }
+            self.hiddenWindow = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) })
+            // Hide the main window NOW (before the 3-second countdown), not
+            // after it. Otherwise the app's own UI gets captured for the first
+            // 3 seconds of every recording — the exact thing julie hit in #2.
+            self.hiddenWindow?.orderOut(nil)
+            self.countdown.run(seconds: 3) { [weak self] in
+                self?.beginCapture()
+            }
+        }
+    }
+
+    /// Request access for the enabled tracks up-front, returning a user-facing
+    /// failure message if a required permission is denied — or nil if
+    /// everything needed is granted. Awaiting the prompt here, before the
+    /// countdown, is what keeps the mic/camera dialog from appearing
+    /// mid-recording.
+    ///
+    /// Screen Recording is intentionally NOT hard-gated: on macOS Sequoia
+    /// `CGPreflightScreenCaptureAccess()` can return a stale `false` even after
+    /// the user granted it, so we only nudge the prompt when undecided and let
+    /// ScreenRecorder surface SCK's real error (with Open Settings + relaunch
+    /// UI) instead of false-blocking a valid grant.
+    @available(macOS 13.0, *)
+    private func preflightPermissions() async -> String? {
+        if includeMic,
+           let msg = await Self.ensureCaptureAccess(
+               for: .audio,
+               deniedMessage: "Microphone access is off — enable it in System Settings → Privacy & Security → Microphone, then click Record again. (Or turn off the mic toggle to record without it.)"
+           ) {
+            return msg
+        }
+        if includeWebcam,
+           let msg = await Self.ensureCaptureAccess(
+               for: .video,
+               deniedMessage: "Camera access is off — enable it in System Settings → Privacy & Security → Camera, then click Record again. (Or turn off the webcam toggle to record without it.)"
+           ) {
+            return msg
+        }
+        // CGRequestScreenCaptureAccess returns immediately (no prompt) when
+        // already granted, so this is safe even if preflight reports a stale
+        // false; it only surfaces the prompt when the OS is genuinely undecided.
+        if !hasScreenRecordingPermission() {
+            _ = requestScreenRecordingPermission()
+        }
+        return nil
+    }
+
+    private static func ensureCaptureAccess(
+        for mediaType: AVMediaType, deniedMessage: String
+    ) async -> String? {
+        switch AVCaptureDevice.authorizationStatus(for: mediaType) {
+        case .authorized:
+            return nil
+        case .notDetermined:
+            return await AVCaptureDevice.requestAccess(for: mediaType) ? nil : deniedMessage
+        case .denied, .restricted:
+            return deniedMessage
+        @unknown default:
+            return deniedMessage
         }
     }
 

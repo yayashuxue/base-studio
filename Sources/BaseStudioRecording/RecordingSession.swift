@@ -7,11 +7,20 @@ import Foundation
 /// to choose the right "Open Settings" pane.
 public enum RecordingSessionError: LocalizedError {
     case cameraPermissionDenied
+    case alreadyRunning
+    case notRunning
+    case missingBundle
 
     public var errorDescription: String? {
         switch self {
         case .cameraPermissionDenied:
             return "Camera permission denied — enable it in System Settings → Privacy & Security → Camera, then try again."
+        case .alreadyRunning:
+            return "A recording is already in progress."
+        case .notRunning:
+            return "No recording is in progress."
+        case .missingBundle:
+            return "Recording bundle was lost before finalize."
         }
     }
 }
@@ -83,7 +92,11 @@ public final class RecordingSession {
     }
 
     public func start(in directory: URL, name: String = defaultName()) async throws -> ProjectBundle {
-        precondition(state == .idle, "RecordingSession already running")
+        // Soft guard instead of `precondition`: a duplicate start should be a
+        // recoverable error, not a hard crash. The VM also guards via `phase`,
+        // but a race between the menu-bar / shortcut / panel paths must never
+        // take the whole app down.
+        guard state == .idle else { throw RecordingSessionError.alreadyRunning }
         let bundle = try ProjectBundle.create(in: directory, name: name)
         self.bundle = bundle
         state = .recording
@@ -134,10 +147,15 @@ public final class RecordingSession {
     }
 
     public func stop() async throws -> ProjectBundle {
-        precondition(state == .recording, "RecordingSession not running")
+        // Graceful guards instead of `precondition`/`fatalError`: a double-stop
+        // (menu-bar Stop + ⌘⇧. + panel all firing), or a stop after a soft
+        // start failure that already reset `state` to `.idle`, must surface as
+        // a catchable error — not crash the app mid-session. This is the most
+        // common "crashed halfway through" path.
+        guard state == .recording else { throw RecordingSessionError.notRunning }
         state = .finalizing
         defer { state = .idle }
-        guard let bundle else { fatalError("no bundle") }
+        guard let bundle else { throw RecordingSessionError.missingBundle }
 
         // Finalize sequentially: screen first, then webcam, then mic. The
         // earlier `async let` parallelization tripped a VideoToolbox session
