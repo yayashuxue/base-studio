@@ -9,6 +9,7 @@ import SwiftUI
 ///  - **Editor** — recordings list · canvas + scrubber + timeline · inspector.
 ///  - **Export bar** — slides up from the bottom while/after exporting.
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var vm = RecordingViewModel()
     @StateObject private var webcamPreview = WebcamPreviewSession()
     @StateObject private var screenPreview = ScreenPreviewSession()
@@ -42,12 +43,28 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             vm.webcamPreview = webcamPreview
-            // `.onChange` doesn't fire on initial value, so honour the
-            // current preview-gate state explicitly on first appear.
+            vm.showWebcamPreview = true
             if shouldRunWebcamPreview {
                 Task { await webcamPreview.startIfPossible() }
             }
             screenPreview.setTarget(vm.selectedTarget)
+        }
+        .onDisappear {
+            vm.showWebcamPreview = false
+            webcamPreview.stop()
+            screenPreview.stop()
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .active:
+                vm.showWebcamPreview = true
+            case .background:
+                vm.showWebcamPreview = false
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
         }
         .onChange(of: shouldRunWebcamPreview) { run in
             Task {
@@ -132,9 +149,9 @@ struct ContentView: View {
         }
     }
 
-    /// True only on Home after explicit webcam preview opt-in, outside of an
-    /// active capture. `includeWebcam` means record the camera track; it should
-    /// not access the camera just because the idle app is open.
+    /// True only while the main Home window owns the preview, outside of an
+    /// active capture. `includeWebcam` means record the camera track; the
+    /// menu-bar-only/hidden app should not keep the camera alive.
     private var shouldRunWebcamPreview: Bool {
         guard vm.includeWebcam else { return false }
         guard vm.showWebcamPreview else { return false }

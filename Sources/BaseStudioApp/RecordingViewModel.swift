@@ -86,8 +86,9 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     // recording. Permission failures degrade gracefully (mic/webcam start
     // is wrapped in do/catch in `RecordingSession`).
     @Published var includeWebcam: Bool = true
-    // Camera preview is separate from "record webcam" and is off by default,
-    // so launching the idle app does not access the camera until requested.
+    // Camera preview is separate from "record webcam". ContentView turns this
+    // on only while the main Home window owns the preview, and turns it off
+    // when Base Studio is hidden/closed or recording.
     @Published var showWebcamPreview: Bool = false
     @Published var includeSystemAudio: Bool = true
     @Published var includeMic: Bool = true
