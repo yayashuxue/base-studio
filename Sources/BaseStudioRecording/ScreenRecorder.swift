@@ -80,6 +80,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var screenFramesAppended: Int = 0
     private var screenAppendFailures: Int = 0
     private var firstAppendFailure: String?
+    private var writerHasFailed: Bool = false
     private var audioBuffersReceived: Int = 0
     private var audioBuffersNonSilent: Int = 0
     private var displayID: UInt32 = 0
@@ -206,7 +207,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         config.height = heightPxFinal
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 8
-        config.pixelFormat = kCVPixelFormatType_32BGRA
+        // Feed VideoToolbox a native YUV format. BGRA capture forces the encoder
+        // through a conversion path that can fail shortly after start on the
+        // built-in Retina display with -16122, leaving a 36-byte screen.mov.
+        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.showsCursor = false
         config.capturesAudio = captureSystemAudio
         if captureSystemAudio {
@@ -225,14 +229,9 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         } catch {
             throw ScreenRecorderError.writerSetupFailed(error.localizedDescription)
         }
-        // H.264 for the recorded source. We previously used HEVC for its better
-        // compression at high resolutions, but on certain macOS / display / GPU
-        // combinations the HEVC HW encoder rejects our SCK BGRA input on the
-        // very first frame with VideoToolbox error -16122, producing a 0-byte
-        // screen.mov + missing metadata.json (see Recording-20260517-155423).
-        // Webcam already uses H.264 and never hits this. Loom / Screen Studio /
-        // Tella all ship H.264 for screen capture for the same robustness reason.
-        // Bitrate kept the same; the file gets ~30% larger but it actually exists.
+        // H.264 for the recorded source. Keep the broadly compatible codec, but
+        // pair it with NV12 frames above so VideoToolbox does not have to encode
+        // SCK's BGRA buffers directly.
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: widthPxFinal,
@@ -286,6 +285,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.audioBuffersReceived = 0
         self.audioBuffersNonSilent = 0
         self.firstAppendFailure = nil
+        self.writerHasFailed = false
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
@@ -295,6 +295,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         try await stream.startCapture()
         self.stream = stream
         self.isRunning = true
+        BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
     }
 
     public func stop() async throws -> Result {
@@ -367,6 +368,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 BSLog.warn("videoInput is nil; dropping frame")
                 return
             }
+            guard !writerHasFailed else { return }
             guard videoInput.isReadyForMoreMediaData else {
                 screenFramesNotReady += 1
                 if screenFramesNotReady % 60 == 1 {
@@ -389,7 +391,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 screenAppendFailures += 1
                 let msg = String(describing: writer?.error)
                 if firstAppendFailure == nil { firstAppendFailure = msg }
-                BSLog.error("append failed, writer.error=\(msg)")
+                if let writer, writer.status == .failed || writer.status == .cancelled {
+                    writerHasFailed = true
+                }
+                BSLog.error("append failed (\(screenAppendFailures)), writer.status=\(writer?.status.rawValue ?? -1), writer.error=\(msg)")
                 return
             }
             screenFramesAppended += 1
