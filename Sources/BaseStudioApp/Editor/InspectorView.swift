@@ -639,7 +639,7 @@ struct InspectorView: View {
         case ("cursor_paint", "scale"): return 2.4
         case ("click_bubble", "maxRadiusPx"): return 180
         case ("webcam_overlay", "sizePx"): return 220
-        case ("webcam_overlay", "marginPx"): return 48
+        case ("webcam_overlay", "marginPx"): return 80
         default: return nil
         }
     }

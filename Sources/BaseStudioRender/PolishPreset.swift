@@ -118,7 +118,10 @@ public enum PolishPreset {
                 nodeType: WebcamOverlay.spec.id,
                 bindings: [
                     "sizePx": .constant(.scalar(220)),
-                    "marginPx": .constant(.scalar(48)),
+                    // Match BackgroundCompose's default padding so the headshot
+                    // hugs the screenshare card instead of floating in the
+                    // background gap.
+                    "marginPx": .constant(.scalar(80)),
                     "corner": .constant(.scalar(3)),
                     "visible": .constant(.bool(true)),
                 ]

@@ -16,7 +16,7 @@ public struct WebcamOverlay: VideoNode {
         paramSchema: [
             ParamSpec(name: "sourceID", type: .scalar, defaultValue: .scalar(0)), // unused; passed via constants
             ParamSpec(name: "sizePx", type: .scalar, defaultValue: .scalar(220)),
-            ParamSpec(name: "marginPx", type: .scalar, defaultValue: .scalar(48)),
+            ParamSpec(name: "marginPx", type: .scalar, defaultValue: .scalar(80)),
             ParamSpec(name: "corner", type: .scalar, defaultValue: .scalar(3)), // 0..3 = TL,TR,BL,BR
             ParamSpec(name: "visible", type: .bool, defaultValue: .bool(true)),
         ]
@@ -27,7 +27,7 @@ public struct WebcamOverlay: VideoNode {
         guard let webcam = ctx.sourceFrame(SourceID.webcam, at: ctx.pts) else { return input }
 
         let size = CGFloat(params["sizePx"]?.asScalar ?? 220)
-        let margin = CGFloat(params["marginPx"]?.asScalar ?? 48)
+        let margin = CGFloat(params["marginPx"]?.asScalar ?? 80)
         let cornerIdx = Int(params["corner"]?.asScalar ?? 3)
 
         // 1. Square-crop the webcam frame to its short side, centered.
