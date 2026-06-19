@@ -48,6 +48,9 @@ struct ContentView: View {
                 Task { await webcamPreview.startIfPossible() }
             }
             screenPreview.setTarget(vm.selectedTarget)
+            if shouldRunScreenPreview {
+                screenPreview.start()
+            }
         }
         .onDisappear {
             vm.showWebcamPreview = false
@@ -74,6 +77,11 @@ struct ContentView: View {
         }
         .onChange(of: vm.selectedTarget) { newTarget in
             screenPreview.setTarget(newTarget)
+            if shouldRunScreenPreview {
+                screenPreview.start()
+            } else {
+                screenPreview.stop()
+            }
         }
         .onChange(of: shouldRunScreenPreview) { run in
             if run { screenPreview.start() } else { screenPreview.stop() }
@@ -138,11 +146,13 @@ struct ContentView: View {
         .disabled(isExportingNow)
     }
 
-    /// True only on Home (no editor) and when no recording is in flight. The
-    /// screen-preview tile is the only consumer; once an editor is loaded the
-    /// preview is off-screen, and the polling cost only adds to render lag.
+    /// True only for selected windows on Home, when no recording is in flight.
+    /// Full-display live preview creates a black/self-referential tile because
+    /// Base Studio itself is covering the display; use the static source card
+    /// for display targets instead.
     private var shouldRunScreenPreview: Bool {
         guard vm.editorState == nil else { return false }
+        guard case .window = vm.selectedTarget else { return false }
         switch vm.phase {
         case .recording, .finalizing, .countingDown: return false
         case .idle, .done, .failed: return true

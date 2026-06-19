@@ -27,8 +27,6 @@ final class ScreenPreviewSession: ObservableObject {
         currentImage = nil
         if newTarget == nil {
             stop()
-        } else {
-            start()
         }
     }
 
