@@ -60,7 +60,14 @@ if [[ ! -f "${ENTITLEMENTS}" ]]; then
     exit 1
 fi
 
-if [[ -n "${APPLE_DEV_ID}" ]]; then
+if [[ "${CONFIG}" == "debug" && -n "${SELF_SIGNED_HASH}" ]]; then
+    echo "→ Signing debug build with '${SELF_SIGNED_NAME}' (stable self-signed identity ${SELF_SIGNED_HASH})"
+    codesign --force --deep --sign "${SELF_SIGNED_HASH}" \
+        --identifier com.basestudio.dev \
+        --options runtime \
+        --entitlements "${ENTITLEMENTS}" \
+        "${APP}" >/dev/null
+elif [[ -n "${APPLE_DEV_ID}" ]]; then
     echo "→ Signing with Apple Developer cert: ${APPLE_DEV_ID}"
     codesign --force --deep --sign "${APPLE_DEV_ID}" \
         --identifier com.basestudio.dev \
