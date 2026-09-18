@@ -180,12 +180,29 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                     .uint32Value == display.displayID
             }
             scale = Double(nsScreen?.backingScaleFactor ?? 2.0)
-            // SCDisplay dimensions are already physical pixels. Multiplying
-            // them by backingScaleFactor double-sizes Retina displays and can
-            // exceed VideoToolbox's H.264 limits, producing -12785 append
-            // failures and 0-byte/36-byte screen.mov files.
-            widthPx = display.width
-            heightPx = display.height
+            // Capture at the display's TRUE physical (framebuffer) pixels.
+            //
+            // `SCDisplay.width/height` is documented in *points*, and on this
+            // macOS (14.6.1) it returns points too — e.g. 1512×982 for a 14"
+            // Retina MBP whose real backing store is 3024×1964. Feeding SCK
+            // config.width = 1512 recorded the screen at HALF resolution, so
+            // playback on a Retina panel looked soft (the "quality is worse
+            // than Cap/Screen Studio" symptom). An earlier revision instead
+            // hard-assumed SCDisplay was already pixels — the opposite error.
+            //
+            // Resolve it unambiguously via CGDisplayCopyDisplayMode's
+            // pixelWidth/pixelHeight (the framebuffer size, version-independent),
+            // and only fall back to points × backingScaleFactor if that's
+            // unavailable. `clampToEncoderLimit` then guards the -12785 /
+            // 0-byte VideoToolbox ceiling the old comment worried about, so we
+            // get full resolution WITHOUT risking the encoder blowup.
+            let physical = Self.physicalPixels(
+                displayID: display.displayID,
+                pointWidth: display.width, pointHeight: display.height,
+                scale: scale
+            )
+            widthPx = physical.0
+            heightPx = physical.1
             filter = SCContentFilter(display: display, excludingWindows: [])
             self.displayOriginPt = nsScreen?.frame.origin ?? .zero
             self.displaySizePt = nsScreen?.frame.size
@@ -296,6 +313,48 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.stream = stream
         self.isRunning = true
         BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
+    }
+
+    /// True physical (framebuffer) pixel size of a display, clamped to a safe
+    /// H.264 encoder ceiling and rounded to even dimensions.
+    ///
+    /// `CGDisplayCopyDisplayMode(_:).pixelWidth/pixelHeight` is the framebuffer
+    /// size in real pixels regardless of whether SCK reported points or pixels,
+    /// so it resolves the points-vs-pixels ambiguity that caused half-res
+    /// capture. Falls back to `pointW/H × scale` if the mode is unavailable.
+    static func physicalPixels(
+        displayID: CGDirectDisplayID,
+        pointWidth: Int, pointHeight: Int, scale: Double
+    ) -> (Int, Int) {
+        var w = 0
+        var h = 0
+        if let mode = CGDisplayCopyDisplayMode(displayID) {
+            w = mode.pixelWidth
+            h = mode.pixelHeight
+        }
+        if w <= 0 || h <= 0 {
+            // Fallback: SCDisplay values are points on this OS, so scale up.
+            w = Int((Double(pointWidth) * scale).rounded())
+            h = Int((Double(pointHeight) * scale).rounded())
+        }
+        return clampToEncoderLimit(w, h)
+    }
+
+    /// Clamp to `maxDimension` on the long edge (preserving aspect) and force
+    /// even width/height. Guards the VideoToolbox -12785 ceiling that produced
+    /// 0-byte/36-byte screen.mov files when dimensions were doubled by mistake.
+    static func clampToEncoderLimit(_ w: Int, _ h: Int, maxDimension: Int = 4096) -> (Int, Int) {
+        var fw = Double(max(w, 2))
+        var fh = Double(max(h, 2))
+        let longEdge = max(fw, fh)
+        if longEdge > Double(maxDimension) {
+            let k = Double(maxDimension) / longEdge
+            fw *= k
+            fh *= k
+        }
+        let ew = (Int(fw.rounded()) >> 1) << 1
+        let eh = (Int(fh.rounded()) >> 1) << 1
+        return (max(ew, 2), max(eh, 2))
     }
 
     public func stop() async throws -> Result {
