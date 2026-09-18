@@ -58,9 +58,20 @@ final class ScreenPreviewSession: ObservableObject {
     /// was started under; a frame that arrives after the source changed is
     /// DROPPED instead of overwriting the new source's image (the "stale
     /// request paints the old tab" flicker).
-    private var generation = 0
+    private(set) var generation = 0
     /// Recent end-to-end request→published latencies (ms) for p50/max logging.
     private var latencies: [Int] = []
+
+    /// A frame carrying `gen` is stale (its source was switched away from) and
+    /// must not be published. `-1` means "no generation attached" (legacy path
+    /// or tests that don't care). Internal for regression tests.
+    func isFrameStale(gen: Int) -> Bool { gen >= 0 && gen != generation }
+
+    /// True when a filter is cached for the current target (no rebuild needed).
+    /// Internal for regression tests — a source switch must clear this.
+    var hasCachedFilterForCurrentTarget: Bool {
+        cachedFilterTarget != nil && cachedFilterTarget == target
+    }
 
     enum FilterBuild {
         case ready(SCContentFilter, SCStreamConfiguration)
@@ -172,7 +183,7 @@ final class ScreenPreviewSession: ObservableObject {
     private func deliver(_ outcome: Outcome, gen: Int = -1, requestedAt: Date? = nil) {
         inFlight = false
         // Drop frames from a source the user already switched away from.
-        if gen >= 0, gen != generation {
+        if isFrameStale(gen: gen) {
             BSLog.info("preview: dropped stale frame (gen \(gen) != \(generation))")
             return
         }
