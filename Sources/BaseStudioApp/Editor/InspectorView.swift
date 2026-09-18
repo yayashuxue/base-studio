@@ -331,6 +331,19 @@ struct InspectorView: View {
             .buttonStyle(.plain)
             .help("Upload an image")
         }
+
+        // Custom color — pick exact top/bottom colors when none of the presets
+        // fit. Only meaningful for gradient backgrounds, so hide it while an
+        // uploaded image owns the canvas. Editing a color implicitly drops the
+        // image (same rule as applyPreset).
+        if bgImage == nil {
+            Divider().padding(.vertical, BS.Space.tight)
+            Text("Custom color")
+                .font(BS.Font.label)
+                .foregroundStyle(BS.Color.textTertiary)
+            colorRow(inst, name: "bgTop", label: "Top")
+            colorRow(inst, name: "bgBottom", label: "Bottom")
+        }
     }
 
     private func tileShape() -> RoundedRectangle {
@@ -748,5 +761,28 @@ struct BackgroundPreset {
               top: .color(r: 0.55, g: 0.72, b: 0.62, a: 1),
               bottom: .color(r: 0.18, g: 0.32, b: 0.30, a: 1),
               style: 2),
+        // Clean neutrals — the "just make the screenshot look crisp" defaults,
+        // in the spirit of Cap / Screen Studio's quiet backgrounds. Low
+        // saturation so the recording, not the backdrop, is the subject.
+        .init(name: "Slate",
+              top: .color(r: 0.95, g: 0.96, b: 0.97, a: 1),
+              bottom: .color(r: 0.87, g: 0.89, b: 0.92, a: 1),
+              style: 0),
+        .init(name: "Porcelain",
+              top: .color(r: 0.99, g: 0.98, b: 0.96, a: 1),
+              bottom: .color(r: 0.93, g: 0.91, b: 0.88, a: 1),
+              style: 0),
+        .init(name: "Onyx",
+              top: .color(r: 0.17, g: 0.18, b: 0.20, a: 1),
+              bottom: .color(r: 0.10, g: 0.10, b: 0.12, a: 1),
+              style: 0),
     ]
+
+    /// The default applied to a freshly-polished recording. A quiet cool
+    /// neutral so the very first thing the user sees isn't a heavy dark-blue
+    /// wash (the "dirty gray" default julie flagged). Any preset/custom color
+    /// still overrides it.
+    static var defaultPreset: BackgroundPreset {
+        all.first { $0.name == "Slate" } ?? all[0]
+    }
 }
