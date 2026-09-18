@@ -53,6 +53,10 @@ let package = Package(
             name: "BaseStudioRenderTests",
             dependencies: ["BaseStudioCore", "BaseStudioRender"]
         ),
+        .testTarget(
+            name: "BaseStudioRecordingTests",
+            dependencies: ["BaseStudioRecording"]
+        ),
     ],
     swiftLanguageModes: [.v5]
 )
