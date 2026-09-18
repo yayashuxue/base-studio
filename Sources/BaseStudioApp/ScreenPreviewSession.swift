@@ -41,10 +41,33 @@ final class ScreenPreviewSession: ObservableObject {
     private let interval: TimeInterval = 1.2
     private var inFlight = false
 
+    // Cached SCContentFilter for the current target. Building it requires a
+    // full `SCShareableContent` enumeration (~100-500ms) — doing that every
+    // 1.2s tick was why the preview felt slow and stalled on every source
+    // switch. We resolve the filter ONCE per target and reuse it for the cheap
+    // per-tick `SCScreenshotManager.captureImage`. `SCContentFilter` tracks a
+    // window by identity, so it stays valid as the window moves; the cache is
+    // dropped on target change (setTarget).
+    private var cachedFilterTarget: CaptureTarget?
+    private var cachedFilter: SCContentFilter?
+    private var cachedConfig: SCStreamConfiguration?
+    /// A slow filter build is already running — don't queue a second one.
+    private var buildingFilter = false
+
+    enum FilterBuild {
+        case ready(SCContentFilter, SCStreamConfiguration)
+        case noScreenPermission
+        case sourceUnavailable
+    }
+
     func setTarget(_ newTarget: CaptureTarget?) {
         guard newTarget != target else { return }
         target = newTarget
         currentImage = nil
+        // Drop the cached filter so the next tick rebuilds for the new source.
+        cachedFilterTarget = nil
+        cachedFilter = nil
+        cachedConfig = nil
         if newTarget == nil {
             stop()
         }
@@ -64,14 +87,71 @@ final class ScreenPreviewSession: ObservableObject {
     }
 
     private func captureOnce() {
-        guard !inFlight, let target else { return }
+        guard let target else { return }
+
+        if #available(macOS 14.0, *) {
+            // Fast path: reuse the cached filter and just grab a frame.
+            if cachedFilterTarget == target, let filter = cachedFilter, let config = cachedConfig {
+                guard !inFlight else { return }
+                inFlight = true
+                captureWith(filter: filter, config: config)
+                return
+            }
+            // Slow path: resolve the filter once for this target, cache it,
+            // then take the first frame. Guarded so ticks don't pile up
+            // multiple SCShareableContent enumerations while one is running.
+            guard !buildingFilter else { return }
+            buildingFilter = true
+            let captured = target
+            Task { [weak self] in
+                let built = await Self.buildFilter(for: captured)
+                guard let self else { return }
+                self.buildingFilter = false
+                // Target changed while we were building — discard.
+                guard self.target == captured else { return }
+                switch built {
+                case .ready(let filter, let config):
+                    self.cachedFilterTarget = captured
+                    self.cachedFilter = filter
+                    self.cachedConfig = config
+                    guard !self.inFlight else { return }
+                    self.inFlight = true
+                    self.captureWith(filter: filter, config: config)
+                case .noScreenPermission:
+                    self.deliver(.noScreenPermission)
+                case .sourceUnavailable:
+                    self.deliver(.sourceUnavailable)
+                }
+            }
+            return
+        }
+
+        // macOS 13 fallback: legacy CG snapshot each tick.
+        guard !inFlight else { return }
         inFlight = true
-        // Hop off the main actor for the CG call — `CGDisplayCreateImage`
-        // can take 30–80ms on a 4K panel and we don't want to drop frames.
         let captured = target
         Task.detached(priority: .utility) { [weak self] in
-            let outcome = await Self.snapshot(for: captured)
-            await self?.deliver(outcome)
+            let cg = Self.legacySnapshot(for: captured)
+            await self?.deliver(cg != nil ? .image(cg!) : .transient)
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func captureWith(filter: SCContentFilter, config: SCStreamConfiguration) {
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                let t0 = Date()
+                let img = try await SCScreenshotManager.captureImage(
+                    contentFilter: filter, configuration: config
+                )
+                let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                // Cheap per-frame capture (cached filter) — only flag if slow.
+                if ms > 120 { BSLog.warn("preview frame slow: \(ms)ms") }
+                await self?.deliver(.image(img))
+            } catch {
+                BSLog.warn("Home preview screenshot failed: \(error)")
+                await self?.deliver(.transient)
+            }
         }
     }
 
@@ -94,26 +174,21 @@ final class ScreenPreviewSession: ObservableObject {
         }
     }
 
-    nonisolated private static func snapshot(for target: CaptureTarget) async -> Outcome {
-        // Prefer SCScreenshotManager on macOS 14+. The legacy
-        // `CGWindowListCreateImage` path is deprecated on Sonoma and returns
-        // nil/black even when Screen Recording is granted — which is exactly
-        // why the Home preview tile showed a dark placeholder instead of a live
-        // thumbnail. Keep the CG path only as the macOS 13 fallback.
-        if #available(macOS 14.0, *) {
-            return await scSnapshot(for: target)
-        }
-        if let cg = legacySnapshot(for: target) { return .image(cg) }
-        return .transient
-    }
-
+    /// Resolve the `SCContentFilter` + config for a target via a single
+    /// `SCShareableContent` enumeration. Only called when the target changes
+    /// (or on first tick), NOT on every frame — that's the whole point of the
+    /// cache. The per-tick screenshot uses the cached result.
     @available(macOS 14.0, *)
-    nonisolated private static func scSnapshot(for target: CaptureTarget) async -> Outcome {
+    nonisolated private static func buildFilter(for target: CaptureTarget) async -> FilterBuild {
         let content: SCShareableContent
+        let t0 = Date()
         do {
             content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: true
             )
+            // This is the expensive call the cache exists to amortize; log it so
+            // first-load / source-switch recovery time is measurable.
+            BSLog.info("preview filter built (SCShareableContent) in \(Int(Date().timeIntervalSince(t0) * 1000))ms")
         } catch {
             // SCShareableContent throws when Screen Recording permission is
             // missing/denied. Report it so the UI can show a Grant affordance
@@ -121,7 +196,6 @@ final class ScreenPreviewSession: ObservableObject {
             BSLog.warn("Home preview: SCShareableContent failed (likely no screen-recording permission): \(error)")
             return .noScreenPermission
         }
-        let filter: SCContentFilter
         let config = SCStreamConfiguration()
         switch target {
         case .display(let id):
@@ -136,26 +210,19 @@ final class ScreenPreviewSession: ObservableObject {
             let ours = content.applications.filter {
                 $0.processID == ProcessInfo.processInfo.processIdentifier
             }
-            filter = SCContentFilter(
+            let filter = SCContentFilter(
                 display: display, excludingApplications: ours, exceptingWindows: []
             )
             config.width = max(display.width, 2)
             config.height = max(display.height, 2)
+            return .ready(filter, config)
         case .window(let id):
             guard let win = content.windows.first(where: { $0.windowID == CGWindowID(id) })
             else { return .sourceUnavailable }
-            filter = SCContentFilter(desktopIndependentWindow: win)
+            let filter = SCContentFilter(desktopIndependentWindow: win)
             config.width = max(Int(win.frame.width), 2)
             config.height = max(Int(win.frame.height), 2)
-        }
-        do {
-            let img = try await SCScreenshotManager.captureImage(
-                contentFilter: filter, configuration: config
-            )
-            return .image(img)
-        } catch {
-            BSLog.warn("Home preview screenshot failed: \(error)")
-            return .transient
+            return .ready(filter, config)
         }
     }
 
