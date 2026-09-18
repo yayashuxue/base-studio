@@ -23,19 +23,23 @@ enum BS {
         // `Color` and AppKit `NSColor` accessors below stay in sync. Only
         // additive members (no opacity tweaks) belong here; derived shades
         // live as separate `static let`s.
-        private static let bgTopHex:      UInt32 = 0x0E0F12
-        private static let bgBottomHex:   UInt32 = 0x08090B
-        private static let surfaceHex:        UInt32 = 0x16181D
-        private static let surfaceRaisedHex:  UInt32 = 0x1C1F26
-        private static let surfaceLitHex:     UInt32 = 0x232730
-        private static let textPrimaryHex:    UInt32 = 0xF5F5F7
-        private static let textSecondaryHex:  UInt32 = 0x9C9DA1
-        private static let textTertiaryHex:   UInt32 = 0x5A5C61
-        private static let accentHex:         UInt32 = 0xF0A93B
-        private static let accentMutedHex:    UInt32 = 0x8C6420
-        private static let onAccentHex:       UInt32 = 0x1A1102
-        private static let recordingRedHex:   UInt32 = 0xFF3B30
-        private static let statusOkHex:       UInt32 = 0x6BCB77
+        // Light "clean canvas" palette (VEED / Cap direction) — quiet cool
+        // neutrals so the recording, not the chrome, is the subject. Replaces
+        // the old warm-dark console look; the video-canvas background is
+        // handled separately by BackgroundCompose (Porcelain).
+        private static let bgTopHex:      UInt32 = 0xF6F7F9
+        private static let bgBottomHex:   UInt32 = 0xEBEEF2
+        private static let surfaceHex:        UInt32 = 0xFFFFFF
+        private static let surfaceRaisedHex:  UInt32 = 0xFAFBFC
+        private static let surfaceLitHex:     UInt32 = 0xEEF1F5
+        private static let textPrimaryHex:    UInt32 = 0x1B1D23
+        private static let textSecondaryHex:  UInt32 = 0x676C76
+        private static let textTertiaryHex:   UInt32 = 0xA0A6B0
+        private static let accentHex:         UInt32 = 0x4B57E6   // indigo, VEED-ish
+        private static let accentMutedHex:    UInt32 = 0xB6BCF5
+        private static let onAccentHex:       UInt32 = 0xFFFFFF
+        private static let recordingRedHex:   UInt32 = 0xE5484D
+        private static let statusOkHex:       UInt32 = 0x30A46C
         private static let meterSystemHex:    UInt32 = 0x4DA3FF
 
         // Backgrounds — warm-dark gradient stops.
@@ -47,11 +51,11 @@ enum BS {
         static let surfaceRaised = SwiftUI.Color(hex: surfaceRaisedHex)
         static let surfaceLit    = SwiftUI.Color(hex: surfaceLitHex)
 
-        // 1pt inner highlight applied to the top edge of surfaces — makes
-        // them read as "lit from above" rather than "stamped on".
-        static let topHighlight = SwiftUI.Color.white.opacity(0.06)
-        static let hairline     = SwiftUI.Color.white.opacity(0.06)
-        static let divider      = SwiftUI.Color.white.opacity(0.04)
+        // On the light palette, card separation comes from a soft dark hairline
+        // + shadow, not a white top sheen. Keep a whisper-faint top edge.
+        static let topHighlight = SwiftUI.Color.black.opacity(0.03)
+        static let hairline     = SwiftUI.Color.black.opacity(0.10)
+        static let divider      = SwiftUI.Color.black.opacity(0.06)
 
         // Text. Three tiers — never use raw white.
         static let textPrimary   = SwiftUI.Color(hex: textPrimaryHex)
@@ -71,7 +75,7 @@ enum BS {
 
         // Status colours — used in indicator pills and meters.
         static let statusOk      = SwiftUI.Color(hex: statusOkHex)
-        static let statusWarn    = SwiftUI.Color(hex: accentHex)
+        static let statusWarn    = SwiftUI.Color(hex: 0xD98200)   // amber — distinct from indigo accent
         static let statusError   = SwiftUI.Color(hex: recordingRedHex)
 
         // Audio meters.

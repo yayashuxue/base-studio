@@ -40,7 +40,7 @@ struct ContentView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
         .onAppear {
             vm.webcamPreview = webcamPreview
             vm.showWebcamPreview = true
