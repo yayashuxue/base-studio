@@ -54,6 +54,14 @@ final class ScreenPreviewSession: ObservableObject {
     /// A slow filter build is already running — don't queue a second one.
     private var buildingFilter = false
 
+    /// Bumped on every source change. A capture Task carries the generation it
+    /// was started under; a frame that arrives after the source changed is
+    /// DROPPED instead of overwriting the new source's image (the "stale
+    /// request paints the old tab" flicker).
+    private var generation = 0
+    /// Recent end-to-end request→published latencies (ms) for p50/max logging.
+    private var latencies: [Int] = []
+
     enum FilterBuild {
         case ready(SCContentFilter, SCStreamConfiguration)
         case noScreenPermission
@@ -64,6 +72,9 @@ final class ScreenPreviewSession: ObservableObject {
         guard newTarget != target else { return }
         target = newTarget
         currentImage = nil
+        // New source: bump the generation so any in-flight capture from the old
+        // source is dropped on arrival instead of painting the wrong tab.
+        generation += 1
         // Drop the cached filter so the next tick rebuilds for the new source.
         cachedFilterTarget = nil
         cachedFilter = nil
@@ -94,7 +105,7 @@ final class ScreenPreviewSession: ObservableObject {
             if cachedFilterTarget == target, let filter = cachedFilter, let config = cachedConfig {
                 guard !inFlight else { return }
                 inFlight = true
-                captureWith(filter: filter, config: config)
+                captureWith(filter: filter, config: config, gen: generation)
                 return
             }
             // Slow path: resolve the filter once for this target, cache it,
@@ -116,7 +127,7 @@ final class ScreenPreviewSession: ObservableObject {
                     self.cachedConfig = config
                     guard !self.inFlight else { return }
                     self.inFlight = true
-                    self.captureWith(filter: filter, config: config)
+                    self.captureWith(filter: filter, config: config, gen: self.generation)
                 case .noScreenPermission:
                     self.deliver(.noScreenPermission)
                 case .sourceUnavailable:
@@ -130,14 +141,17 @@ final class ScreenPreviewSession: ObservableObject {
         guard !inFlight else { return }
         inFlight = true
         let captured = target
+        let gen = generation
+        let requestedAt = Date()
         Task.detached(priority: .utility) { [weak self] in
             let cg = Self.legacySnapshot(for: captured)
-            await self?.deliver(cg != nil ? .image(cg!) : .transient)
+            await self?.deliver(cg != nil ? .image(cg!) : .transient, gen: gen, requestedAt: requestedAt)
         }
     }
 
     @available(macOS 14.0, *)
-    private func captureWith(filter: SCContentFilter, config: SCStreamConfiguration) {
+    private func captureWith(filter: SCContentFilter, config: SCStreamConfiguration, gen: Int) {
+        let requestedAt = Date()
         Task.detached(priority: .utility) { [weak self] in
             do {
                 let t0 = Date()
@@ -147,16 +161,32 @@ final class ScreenPreviewSession: ObservableObject {
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
                 // Cheap per-frame capture (cached filter) — only flag if slow.
                 if ms > 120 { BSLog.warn("preview frame slow: \(ms)ms") }
-                await self?.deliver(.image(img))
+                await self?.deliver(.image(img), gen: gen, requestedAt: requestedAt)
             } catch {
                 BSLog.warn("Home preview screenshot failed: \(error)")
-                await self?.deliver(.transient)
+                await self?.deliver(.transient, gen: gen, requestedAt: requestedAt)
             }
         }
     }
 
-    private func deliver(_ outcome: Outcome) {
+    private func deliver(_ outcome: Outcome, gen: Int = -1, requestedAt: Date? = nil) {
         inFlight = false
+        // Drop frames from a source the user already switched away from.
+        if gen >= 0, gen != generation {
+            BSLog.info("preview: dropped stale frame (gen \(gen) != \(generation))")
+            return
+        }
+        if case .image = outcome, let requestedAt {
+            let ms = Int(Date().timeIntervalSince(requestedAt) * 1000)
+            latencies.append(ms)
+            if latencies.count >= 8 {
+                let sorted = latencies.sorted()
+                let p50 = sorted[sorted.count / 2]
+                let mx = sorted.last ?? ms
+                BSLog.info("preview end-to-end latency: p50=\(p50)ms max=\(mx)ms (n=\(latencies.count))")
+                latencies.removeAll(keepingCapacity: true)
+            }
+        }
         switch outcome {
         case .image(let cg):
             currentImage = NSImage(cgImage: cg, size: .zero)
