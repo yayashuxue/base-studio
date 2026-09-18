@@ -17,6 +17,24 @@ import ScreenCaptureKit
 @MainActor
 final class ScreenPreviewSession: ObservableObject {
     @Published private(set) var currentImage: NSImage?
+    /// Screen Recording permission is missing/denied — the preview can't snap
+    /// anything, so the UI should offer a Grant/Settings affordance instead of
+    /// a silent black placeholder.
+    @Published private(set) var screenPermissionNeeded = false
+    /// The selected display/window couldn't be found in the shareable content.
+    /// Surface "source unavailable / refresh" rather than silently previewing
+    /// a *different* screen.
+    @Published private(set) var sourceUnavailable = false
+
+    /// Outcome of one snapshot attempt. Lets the @MainActor session update its
+    /// published permission/availability flags without the nonisolated capture
+    /// code touching actor state directly.
+    enum Outcome {
+        case image(CGImage)
+        case noScreenPermission
+        case sourceUnavailable
+        case transient   // first frame in flight / one-off failure; keep prior state
+    }
 
     private var target: CaptureTarget?
     private var timer: Timer?
@@ -52,67 +70,92 @@ final class ScreenPreviewSession: ObservableObject {
         // can take 30–80ms on a 4K panel and we don't want to drop frames.
         let captured = target
         Task.detached(priority: .utility) { [weak self] in
-            let cg = await Self.snapshot(for: captured)
-            await self?.deliver(cg)
+            let outcome = await Self.snapshot(for: captured)
+            await self?.deliver(outcome)
         }
     }
 
-    private func deliver(_ cg: CGImage?) {
+    private func deliver(_ outcome: Outcome) {
         inFlight = false
-        if let cg {
+        switch outcome {
+        case .image(let cg):
             currentImage = NSImage(cgImage: cg, size: .zero)
+            screenPermissionNeeded = false
+            sourceUnavailable = false
+        case .noScreenPermission:
+            currentImage = nil
+            screenPermissionNeeded = true
+            sourceUnavailable = false
+        case .sourceUnavailable:
+            currentImage = nil
+            sourceUnavailable = true
+        case .transient:
+            break   // keep whatever we last showed (placeholder or last frame)
         }
     }
 
-    nonisolated private static func snapshot(for target: CaptureTarget) async -> CGImage? {
+    nonisolated private static func snapshot(for target: CaptureTarget) async -> Outcome {
         // Prefer SCScreenshotManager on macOS 14+. The legacy
         // `CGWindowListCreateImage` path is deprecated on Sonoma and returns
         // nil/black even when Screen Recording is granted — which is exactly
         // why the Home preview tile showed a dark placeholder instead of a live
         // thumbnail. Keep the CG path only as the macOS 13 fallback.
         if #available(macOS 14.0, *) {
-            if let img = await scSnapshot(for: target) { return img }
-            // Fall through: on a permission edge case SC returns nil; the
-            // legacy call may still succeed on some setups.
+            return await scSnapshot(for: target)
         }
-        return legacySnapshot(for: target)
+        if let cg = legacySnapshot(for: target) { return .image(cg) }
+        return .transient
     }
 
     @available(macOS 14.0, *)
-    nonisolated private static func scSnapshot(for target: CaptureTarget) async -> CGImage? {
+    nonisolated private static func scSnapshot(for target: CaptureTarget) async -> Outcome {
+        let content: SCShareableContent
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
+            content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: true
             )
-            let filter: SCContentFilter
-            let config = SCStreamConfiguration()
-            switch target {
-            case .display(let id):
-                guard let display = content.displays.first(where: { $0.displayID == id })
-                        ?? content.displays.first else { return nil }
-                // Exclude our own app so the tile shows what will be recorded,
-                // not an infinite mirror of Base Studio inside itself.
-                let ours = content.applications.filter {
-                    $0.processID == ProcessInfo.processInfo.processIdentifier
-                }
-                filter = SCContentFilter(
-                    display: display, excludingApplications: ours, exceptingWindows: []
-                )
-                config.width = max(display.width, 2)
-                config.height = max(display.height, 2)
-            case .window(let id):
-                guard let win = content.windows.first(where: { $0.windowID == CGWindowID(id) })
-                else { return nil }
-                filter = SCContentFilter(desktopIndependentWindow: win)
-                config.width = max(Int(win.frame.width), 2)
-                config.height = max(Int(win.frame.height), 2)
+        } catch {
+            // SCShareableContent throws when Screen Recording permission is
+            // missing/denied. Report it so the UI can show a Grant affordance
+            // instead of an unexplained black tile.
+            BSLog.warn("Home preview: SCShareableContent failed (likely no screen-recording permission): \(error)")
+            return .noScreenPermission
+        }
+        let filter: SCContentFilter
+        let config = SCStreamConfiguration()
+        switch target {
+        case .display(let id):
+            // Do NOT fall back to displays.first — silently previewing a
+            // different screen than the one selected is worse than showing
+            // "source unavailable".
+            guard let display = content.displays.first(where: { $0.displayID == id }) else {
+                return .sourceUnavailable
             }
-            return try await SCScreenshotManager.captureImage(
+            // Exclude our own app so the tile shows what will be recorded,
+            // not an infinite mirror of Base Studio inside itself.
+            let ours = content.applications.filter {
+                $0.processID == ProcessInfo.processInfo.processIdentifier
+            }
+            filter = SCContentFilter(
+                display: display, excludingApplications: ours, exceptingWindows: []
+            )
+            config.width = max(display.width, 2)
+            config.height = max(display.height, 2)
+        case .window(let id):
+            guard let win = content.windows.first(where: { $0.windowID == CGWindowID(id) })
+            else { return .sourceUnavailable }
+            filter = SCContentFilter(desktopIndependentWindow: win)
+            config.width = max(Int(win.frame.width), 2)
+            config.height = max(Int(win.frame.height), 2)
+        }
+        do {
+            let img = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: config
             )
+            return .image(img)
         } catch {
             BSLog.warn("Home preview screenshot failed: \(error)")
-            return nil
+            return .transient
         }
     }
 
