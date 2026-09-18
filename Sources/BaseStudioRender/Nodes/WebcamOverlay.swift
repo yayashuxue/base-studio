@@ -18,6 +18,7 @@ public struct WebcamOverlay: VideoNode {
             ParamSpec(name: "sizePx", type: .scalar, defaultValue: .scalar(220)),
             ParamSpec(name: "marginPx", type: .scalar, defaultValue: .scalar(80)),
             ParamSpec(name: "corner", type: .scalar, defaultValue: .scalar(3)), // 0..3 = TL,TR,BL,BR
+            ParamSpec(name: "shape", type: .scalar, defaultValue: .scalar(0)),  // 0 = circle, 1 = rounded rect
             ParamSpec(name: "visible", type: .bool, defaultValue: .bool(true)),
         ]
     )
@@ -29,6 +30,7 @@ public struct WebcamOverlay: VideoNode {
         let size = CGFloat(params["sizePx"]?.asScalar ?? 220)
         let margin = CGFloat(params["marginPx"]?.asScalar ?? 80)
         let cornerIdx = Int(params["corner"]?.asScalar ?? 3)
+        let isRounded = Int(params["shape"]?.asScalar ?? 0) == 1
 
         // 1. Square-crop the webcam frame to its short side, centered.
         let we = webcam.extent
@@ -44,8 +46,10 @@ public struct WebcamOverlay: VideoNode {
         let scaled = cropped.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             .cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
 
-        // 3. Circular mask.
-        let mask = circleMask(diameter: size)
+        // 3. Shape mask — circle or rounded rect.
+        let mask = isRounded
+            ? roundedRectMask(size: size, corner: size * 0.20)
+            : circleMask(diameter: size)
         let masked = scaled.applyingFilter("CIBlendWithAlphaMask", parameters: [
             kCIInputBackgroundImageKey: CIImage(color: .clear)
                 .cropped(to: CGRect(x: 0, y: 0, width: size, height: size)),
@@ -73,6 +77,24 @@ public struct WebcamOverlay: VideoNode {
 
         return placed.composited(over: shadow.composited(over: input))
             .cropped(to: input.extent)
+    }
+
+    private func roundedRectMask(size: CGFloat, corner: CGFloat) -> CIImage {
+        let cs = CGColorSpaceCreateDeviceGray()
+        let n = Int(size)
+        guard let bctx = CGContext(
+            data: nil, width: n, height: n, bitsPerComponent: 8,
+            bytesPerRow: 0, space: cs, bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue
+        ) else { return CIImage.empty() }
+        bctx.setFillColor(gray: 1, alpha: 1)
+        let path = CGPath(
+            roundedRect: CGRect(x: 0, y: 0, width: size, height: size),
+            cornerWidth: corner, cornerHeight: corner, transform: nil
+        )
+        bctx.addPath(path)
+        bctx.fillPath()
+        guard let cg = bctx.makeImage() else { return CIImage.empty() }
+        return CIImage(cgImage: cg)
     }
 
     private func circleMask(diameter: CGFloat) -> CIImage {

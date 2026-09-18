@@ -65,6 +65,42 @@ final class BackgroundRenderSnapshotTests: XCTestCase {
         XCTAssertFalse(porcelain.extent.isInfinite, "compose produced an unbounded image")
     }
 
+    func testWebcamOverlayCircleVsRoundedForReview() throws {
+        let ciContext = CIContext(options: [.useSoftwareRenderer: true])
+        let canvas = CanvasSpec(widthPx: 1280, heightPx: 720)
+        let canvasRect = CGRect(x: 0, y: 0, width: 1280, height: 720)
+        let source = SourceClip(
+            id: SourceID.screen, relativeMediaPath: "screen.mov",
+            widthPx: 1280, heightPx: 720, firstPTS: TimePoint(.zero), sidecars: []
+        )
+        // A distinctive "webcam frame" so the shape mask edge reads clearly.
+        let webcam = CIImage(color: CIColor(red: 0.85, green: 0.2, blue: 0.55))
+            .cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480))
+        let ctx = RenderCtx(
+            pts: .zero, canvas: canvas, quality: .high,
+            primarySource: source, ciContext: ciContext,
+            frameProvider: { id, _ in id == SourceID.webcam ? webcam : nil }
+        )
+        let base = CIImage(color: CIColor(red: 0.95, green: 0.96, blue: 0.97)).cropped(to: canvasRect)
+        let node = WebcamOverlay()
+
+        let circle = node.apply(
+            input: base,
+            params: ParamValues(["sizePx": .scalar(240), "shape": .scalar(0)]),
+            ctx: ctx
+        )
+        try write(circle, ciContext, canvas, to: "/tmp/webcam-circle.png")
+
+        let rounded = node.apply(
+            input: base,
+            params: ParamValues(["sizePx": .scalar(240), "shape": .scalar(1)]),
+            ctx: ctx
+        )
+        try write(rounded, ciContext, canvas, to: "/tmp/webcam-rounded.png")
+
+        XCTAssertFalse(circle.extent.isInfinite)
+    }
+
     private func write(_ image: CIImage, _ ciContext: CIContext, _ canvas: CanvasSpec, to path: String) throws {
         let rect = CGRect(x: 0, y: 0, width: canvas.widthPx, height: canvas.heightPx)
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!
