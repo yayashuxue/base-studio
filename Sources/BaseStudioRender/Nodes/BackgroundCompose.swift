@@ -41,6 +41,9 @@ public struct BackgroundCompose: VideoNode {
             ParamSpec(name: "bgBottom", type: .color, defaultValue: .color(r: 0.93, g: 0.91, b: 0.88, a: 1)),
             // 0 = linear (top→bottom), 1 = radial, 2 = diagonal mesh.
             ParamSpec(name: "bgStyle", type: .scalar, defaultValue: .scalar(0)),
+            // Hairline edge alpha on the screen card so a white screen doesn't
+            // melt into the light default background. 0 disables it.
+            ParamSpec(name: "borderOpacity", type: .scalar, defaultValue: .scalar(0.12)),
         ]
     )
 
@@ -112,7 +115,23 @@ public struct BackgroundCompose: VideoNode {
 
         // 5. Compose: bg + shadow + maskedInput.
         let withShadow = shadow.composited(over: bg)
-        let result = maskedInput.composited(over: withShadow)
+        let composited = maskedInput.composited(over: withShadow)
+
+        // 6. Hairline edge on the screen card. On the light Porcelain default a
+        // white webpage/doc would otherwise melt into the background — a very
+        // faint neutral 1px stroke keeps the card readable on light AND dark
+        // backdrops without looking like a heavy frame.
+        let borderOp = CGFloat(params["borderOpacity"]?.asScalar ?? 0.12)
+        let result: CIImage
+        if borderOp > 0.001 {
+            let stroke = strokeImage(
+                rect: placedRect, radius: corner, canvas: canvasRect,
+                lineWidth: 2, alpha: borderOp
+            )
+            result = stroke.composited(over: composited)
+        } else {
+            result = composited
+        }
         return result.cropped(to: canvasRect)
     }
 
@@ -207,6 +226,31 @@ public struct BackgroundCompose: VideoNode {
             .translatedBy(x: dx, y: dy)
             .scaledBy(x: scale, y: scale)
         return img.transformed(by: t).cropped(to: rect)
+    }
+
+    /// A transparent canvas-sized image with only a neutral rounded-rect
+    /// outline stroked at `rect`, inset so the line sits inside the card edge
+    /// (aligned with the fill mask). Used as the hairline separator.
+    private func strokeImage(
+        rect: CGRect, radius: CGFloat, canvas: CGRect,
+        lineWidth: CGFloat, alpha: CGFloat
+    ) -> CIImage {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let w = Int(canvas.width), h = Int(canvas.height)
+        guard let bctx = CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: 0, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return CIImage.empty() }
+        bctx.setStrokeColor(red: 0, green: 0, blue: 0, alpha: alpha)
+        bctx.setLineWidth(lineWidth)
+        let inset = rect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
+        let r = max(0, radius - lineWidth / 2)
+        let path = CGPath(roundedRect: inset, cornerWidth: r, cornerHeight: r, transform: nil)
+        bctx.addPath(path)
+        bctx.strokePath()
+        guard let cg = bctx.makeImage() else { return CIImage.empty() }
+        return CIImage(cgImage: cg)
     }
 
     private func roundedRectMask(rect: CGRect, radius: CGFloat, canvas: CGRect) -> CIImage {

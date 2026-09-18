@@ -48,6 +48,20 @@ final class BackgroundRenderSnapshotTests: XCTestCase {
         ]), ctx: ctx)
         try write(dark, ciContext, canvas, to: "/tmp/bg-dark-old.png")
 
+        // 小o's "melt" case: a near-white screen (webpage/doc) on the warm-white
+        // Porcelain default. The hairline edge + soft shadow must keep the card
+        // readable. Render with the border ON and OFF for comparison.
+        let whiteInput = CIImage(color: CIColor(red: 0.99, green: 0.99, blue: 0.99))
+            .cropped(to: CGRect(x: 0, y: 0, width: 800, height: 450))
+        let whiteBordered = node.apply(input: whiteInput, params: ParamValues(), ctx: ctx)
+        try write(whiteBordered, ciContext, canvas, to: "/tmp/bg-white-porcelain-border.png")
+        let whiteNoBorder = node.apply(
+            input: whiteInput,
+            params: ParamValues(["borderOpacity": .scalar(0)]),
+            ctx: ctx
+        )
+        try write(whiteNoBorder, ciContext, canvas, to: "/tmp/bg-white-porcelain-noborder.png")
+
         XCTAssertFalse(porcelain.extent.isInfinite, "compose produced an unbounded image")
     }
 
