@@ -778,11 +778,12 @@ struct BackgroundPreset {
               style: 0),
     ]
 
-    /// The default applied to a freshly-polished recording. A quiet cool
-    /// neutral so the very first thing the user sees isn't a heavy dark-blue
-    /// wash (the "dirty gray" default julie flagged). Any preset/custom color
-    /// still overrides it.
+    /// The default look for a freshly-polished recording — a warm-white
+    /// neutral ("Porcelain"), matching `BackgroundCompose`'s spec default. It's
+    /// the closest to julie's VEED reference and the least distracting from the
+    /// screen content (replaces the old dark-blue wash). Any preset/custom
+    /// color still overrides it.
     static var defaultPreset: BackgroundPreset {
-        all.first { $0.name == "Slate" } ?? all[0]
+        all.first { $0.name == "Porcelain" } ?? all[0]
     }
 }

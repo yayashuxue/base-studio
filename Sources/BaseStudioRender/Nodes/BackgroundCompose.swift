@@ -29,10 +29,16 @@ public struct BackgroundCompose: VideoNode {
         paramSchema: [
             ParamSpec(name: "paddingPx", type: .scalar, defaultValue: .scalar(80)),
             ParamSpec(name: "cornerRadiusPx", type: .scalar, defaultValue: .scalar(24)),
-            ParamSpec(name: "shadowRadiusPx", type: .scalar, defaultValue: .scalar(40)),
-            ParamSpec(name: "shadowOpacity", type: .scalar, defaultValue: .scalar(0.35)),
-            ParamSpec(name: "bgTop", type: .color, defaultValue: .color(r: 0.13, g: 0.18, b: 0.32, a: 1)),
-            ParamSpec(name: "bgBottom", type: .color, defaultValue: .color(r: 0.05, g: 0.06, b: 0.10, a: 1)),
+            ParamSpec(name: "shadowRadiusPx", type: .scalar, defaultValue: .scalar(48)),
+            // Light warm-white default (see bgTop/bgBottom) wants a soft, low
+            // shadow — a heavy 0.35 black wash looks muddy on a light backdrop.
+            ParamSpec(name: "shadowOpacity", type: .scalar, defaultValue: .scalar(0.18)),
+            // Default background: "Porcelain" warm-white neutral. Closest to the
+            // VEED reference and the least distracting from the screen content
+            // (replaces the old dark blue-black wash julie flagged as ugly).
+            // Dark/vibrant looks live on as presets in the inspector.
+            ParamSpec(name: "bgTop", type: .color, defaultValue: .color(r: 0.99, g: 0.98, b: 0.96, a: 1)),
+            ParamSpec(name: "bgBottom", type: .color, defaultValue: .color(r: 0.93, g: 0.91, b: 0.88, a: 1)),
             // 0 = linear (top→bottom), 1 = radial, 2 = diagonal mesh.
             ParamSpec(name: "bgStyle", type: .scalar, defaultValue: .scalar(0)),
         ]
@@ -41,8 +47,8 @@ public struct BackgroundCompose: VideoNode {
     public func apply(input: CIImage, params: ParamValues, ctx: RenderCtx) -> CIImage {
         let padding = CGFloat(params["paddingPx"]?.asScalar ?? 80)
         let corner = CGFloat(params["cornerRadiusPx"]?.asScalar ?? 24)
-        let shadowR = CGFloat(params["shadowRadiusPx"]?.asScalar ?? 40)
-        let shadowOp = CGFloat(params["shadowOpacity"]?.asScalar ?? 0.35)
+        let shadowR = CGFloat(params["shadowRadiusPx"]?.asScalar ?? 48)
+        let shadowOp = CGFloat(params["shadowOpacity"]?.asScalar ?? 0.18)
 
         let canvasW = CGFloat(ctx.canvas.widthPx)
         let canvasH = CGFloat(ctx.canvas.heightPx)
@@ -58,8 +64,8 @@ public struct BackgroundCompose: VideoNode {
             bg = fitCover(img, into: canvasRect)
         } else {
             let style = Int(params["bgStyle"]?.asScalar ?? 0)
-            let topC = params["bgTop"]?.asColor ?? (0.13, 0.18, 0.32, 1)
-            let botC = params["bgBottom"]?.asColor ?? (0.05, 0.06, 0.10, 1)
+            let topC = params["bgTop"]?.asColor ?? (0.99, 0.98, 0.96, 1)
+            let botC = params["bgBottom"]?.asColor ?? (0.93, 0.91, 0.88, 1)
             switch style {
             case 1: bg = radialGradient(top: topC, bottom: botC, in: canvasRect)
             case 2: bg = diagonalMesh(top: topC, bottom: botC, in: canvasRect)
