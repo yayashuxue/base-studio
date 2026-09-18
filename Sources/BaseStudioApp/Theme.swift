@@ -34,7 +34,7 @@ enum BS {
         private static let surfaceLitHex:     UInt32 = 0xEEF1F5
         private static let textPrimaryHex:    UInt32 = 0x1B1D23
         private static let textSecondaryHex:  UInt32 = 0x676C76
-        private static let textTertiaryHex:   UInt32 = 0xA0A6B0
+        private static let textTertiaryHex:   UInt32 = 0x878D99
         private static let accentHex:         UInt32 = 0x4B57E6   // indigo, VEED-ish
         private static let accentMutedHex:    UInt32 = 0xB6BCF5
         private static let onAccentHex:       UInt32 = 0xFFFFFF
@@ -238,7 +238,7 @@ extension View {
         self
             .background(
                 Capsule(style: .continuous)
-                    .fill(isOn ? BS.Color.accent.opacity(0.18) : BS.Color.surface)
+                    .fill(isOn ? BS.Color.accent.opacity(0.10) : BS.Color.surface)
             )
             .overlay(
                 Capsule(style: .continuous)

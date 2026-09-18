@@ -14,6 +14,7 @@ struct HomeView: View {
     var body: some View {
         HStack(spacing: 0) {
             RecordingsListView(vm: vm)
+            BSHairline(axis: .vertical)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: BS.Space.section) {
@@ -224,7 +225,7 @@ struct HomeView: View {
 
     @ViewBuilder
     private var webcamOverlay: some View {
-        let size: CGFloat = 96
+        let size: CGFloat = 84
         ZStack {
             Circle()
                 .fill(BS.Color.surface)
@@ -244,7 +245,7 @@ struct HomeView: View {
             }
         }
         .frame(width: size, height: size)
-        .shadow(color: .black.opacity(0.45), radius: 14, x: 0, y: 6)
+        .shadow(color: .black.opacity(0.12), radius: 7, x: 0, y: 2)
     }
 
     private func webcamPreviewOffBadge(size: CGFloat) -> some View {
