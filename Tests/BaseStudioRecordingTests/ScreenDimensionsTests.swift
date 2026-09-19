@@ -23,6 +23,21 @@ final class ScreenDimensionsTests: XCTestCase {
     // with real GUI recordings. clampToEncoderLimit remains the general encoder
     // guard, tested above/below.
 
+    @available(macOS 13.0, *)
+    func testPhysicalPixelsDoesNotUpscaleBeyondSCDisplayDims() {
+        // The regression this whole PR fought: physicalPixels must NOT return
+        // the doubled framebuffer size (3024×1964) that -12785'd real
+        // recordings — it stays at the SCDisplay dims it's given. This is a
+        // pure-logic guard that a headless CI CAN run (unlike the live encoder),
+        // so the resolution regression can't silently come back.
+        let (w, h) = ScreenRecorder.physicalPixels(
+            displayID: CGMainDisplayID(),
+            pointWidth: 1512, pointHeight: 982, scale: 2.0
+        )
+        XCTAssertEqual(w, 1512, "screen capture must not upscale past SCDisplay width")
+        XCTAssertEqual(h, 982, "screen capture must not upscale past SCDisplay height")
+    }
+
     func testOddDimensionsRoundedToEven() {
         // H.264 requires even dimensions; an odd input must be rounded down.
         let (w, h) = ScreenRecorder.clampToEncoderLimit(1921, 1081)
