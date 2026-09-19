@@ -337,8 +337,21 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             w = Int((Double(pointWidth) * scale).rounded())
             h = Int((Double(pointHeight) * scale).rounded())
         }
-        return clampToEncoderLimit(w, h)
+        // ⚠️ Reliability cap. Capturing at the FULL native 3024×1964 (14" MBP)
+        // regressed real recordings to -12785 (kVTInvalidSessionErr): SCK's
+        // large IOSurface queue + the 29 Mbps H.264 stream + the concurrent
+        // webcam/mic capture sessions tip the media subsystem over mid-record,
+        // corrupting screen.mov. (Isolated H.264 encoding at 3024 is fine — it's
+        // the full concurrent capture stack that fails.) The old code sat at the
+        // logical 1512 to dodge this; 1920 is a middle ground — ~1.6× the pixels
+        // of 1512 (visibly crisper) while staying well inside the encoder budget
+        // alongside a webcam. Raise only with real multi-round recording proof.
+        return clampToEncoderLimit(w, h, maxDimension: Self.screenCaptureMaxDimension)
     }
+
+    /// Long-edge ceiling for screen capture. Conservative on purpose — see the
+    /// -12785 note in `physicalPixels`.
+    static let screenCaptureMaxDimension = 1920
 
     /// Clamp to `maxDimension` on the long edge (preserving aspect) and force
     /// even width/height. Guards the VideoToolbox -12785 ceiling that produced
