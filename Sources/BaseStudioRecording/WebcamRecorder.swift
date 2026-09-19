@@ -21,6 +21,11 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
         public let lastPTS: CMTime
         public let widthPx: Int
         public let heightPx: Int
+        /// Frames actually written to webcam.mov. `0` means the camera session
+        /// started but delivered nothing (device busy from a not-yet-released
+        /// preview session, revoked mid-session, etc.) — the caller MUST treat
+        /// that as a visible failure, not silently drop a requested track.
+        public let framesAppended: Int
     }
 
     private let queue = DispatchQueue(label: "BaseStudio.Webcam")
@@ -32,6 +37,7 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
     private var lastPTS: CMTime?
     private var widthPx: Int = 0
     private var heightPx: Int = 0
+    private var framesAppended: Int = 0
     private var isRunning = false
 
     public override init() { super.init() }
@@ -126,6 +132,7 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
         self.videoInput = videoInput
         self.firstPTS = nil
         self.lastPTS = nil
+        self.framesAppended = 0
 
         session.startRunning()
         isRunning = true
@@ -133,15 +140,27 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
 
     public func stop() async -> Result {
         guard isRunning else {
-            return Result(firstPTS: .zero, lastPTS: .zero, widthPx: widthPx, heightPx: heightPx)
+            return Result(firstPTS: .zero, lastPTS: .zero, widthPx: widthPx, heightPx: heightPx, framesAppended: 0)
         }
         session?.stopRunning()
         videoInput?.markAsFinished()
         await writer?.finishWriting()
+        let writerStatus = writer?.status ?? .unknown
+        let writerError = writer?.error
+        // A requested webcam that captured zero frames must NOT vanish silently
+        // (that's the "recorded webcam is gone with no error" symptom). Log it
+        // loudly here; RecordingSession turns it into a diagnostic sidecar +
+        // surfaces the missing track instead of quietly omitting it.
+        if framesAppended == 0 {
+            BSLog.error("webcam captured 0 frames — writer.status=\(writerStatus.rawValue), error=\(String(describing: writerError)). Likely the camera was still held by the preview session, or access was revoked mid-session.")
+        } else {
+            BSLog.info("webcam stopped — framesAppended=\(framesAppended), writer.status=\(writerStatus.rawValue)")
+        }
         let result = Result(
             firstPTS: firstPTS ?? .zero,
             lastPTS: lastPTS ?? .zero,
-            widthPx: widthPx, heightPx: heightPx
+            widthPx: widthPx, heightPx: heightPx,
+            framesAppended: framesAppended
         )
         session = nil; output = nil; writer = nil; videoInput = nil
         isRunning = false
@@ -162,6 +181,8 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
             writer?.startSession(atSourceTime: pts)
         }
         lastPTS = pts
-        videoInput.append(sampleBuffer)
+        if videoInput.append(sampleBuffer) {
+            framesAppended += 1
+        }
     }
 }

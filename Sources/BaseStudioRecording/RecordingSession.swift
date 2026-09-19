@@ -207,12 +207,25 @@ public final class RecordingSession {
                 heightPx: screenResult.heightPx
             ),
         ]
-        if let w = webcamResult, w.firstPTS != .zero {
+        if let w = webcamResult, w.firstPTS != .zero, w.framesAppended > 0 {
             sourceInfo[SourceID.webcam] = SourceMediaInfo(
                 firstVideoPTS: TimePoint(w.firstPTS),
                 lastVideoPTS: TimePoint(w.lastPTS),
                 widthPx: w.widthPx,
                 heightPx: w.heightPx
+            )
+        } else if options.includeWebcam {
+            // Webcam was requested but produced no usable frames. Don't drop the
+            // track silently (the "my webcam is just gone" bug) — the screen
+            // recording is still good, but leave a diagnostic sidecar so the
+            // missing webcam is explainable instead of a mystery.
+            BSLog.error("webcam requested but captured 0 frames — omitting webcam source, writing diagnostic")
+            writeFailureSidecar(
+                bundle: bundle,
+                phase: "webcam.zeroFrames",
+                error: RecordingSessionError.webcamUnavailable(
+                    "camera delivered no frames (framesAppended=\(webcamResult?.framesAppended ?? 0)); it may have still been held by the preview session"
+                )
             )
         }
 

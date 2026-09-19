@@ -33,6 +33,35 @@ public enum ScreenRecorderError: Error, LocalizedError {
     }
 }
 
+/// Minimal seam over the SCStream operations `ScreenRecorder` drives, so the
+/// failure / cleanup paths (add-output throw, startCapture throw, stopCapture
+/// throw, output-removal on teardown) can be unit-tested with a throwing fake —
+/// no live ScreenCaptureKit capture required. The production impl forwards to a
+/// real `SCStream`; tests inject a fake via `ScreenRecorder.streamAdapterFactory`.
+@available(macOS 13.0, *)
+protocol ScreenStreamAdapter: AnyObject {
+    func addOutput(_ output: SCStreamOutput, type: SCStreamOutputType, queue: DispatchQueue) throws
+    func removeOutput(_ output: SCStreamOutput, type: SCStreamOutputType) throws
+    func startCapture() async throws
+    func stopCapture() async throws
+}
+
+@available(macOS 13.0, *)
+final class RealSCStreamAdapter: ScreenStreamAdapter {
+    private let stream: SCStream
+    init(filter: SCContentFilter, configuration: SCStreamConfiguration, delegate: SCStreamDelegate) {
+        stream = SCStream(filter: filter, configuration: configuration, delegate: delegate)
+    }
+    func addOutput(_ output: SCStreamOutput, type: SCStreamOutputType, queue: DispatchQueue) throws {
+        try stream.addStreamOutput(output, type: type, sampleHandlerQueue: queue)
+    }
+    func removeOutput(_ output: SCStreamOutput, type: SCStreamOutputType) throws {
+        try stream.removeStreamOutput(output, type: type)
+    }
+    func startCapture() async throws { try await stream.startCapture() }
+    func stopCapture() async throws { try await stream.stopCapture() }
+}
+
 /// Whether macOS has granted Screen Recording permission to this app.
 @available(macOS 13.0, *)
 public func hasScreenRecordingPermission() -> Bool {
@@ -66,7 +95,16 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     // Separate queues so audio buffers (~47/sec) don't starve screen frames (~60/sec).
     private let screenQueue = DispatchQueue(label: "BaseStudio.SCKScreen", qos: .userInitiated)
     private let audioQueue = DispatchQueue(label: "BaseStudio.SCKAudio", qos: .userInitiated)
-    private var stream: SCStream?
+    private var streamAdapter: ScreenStreamAdapter?
+    /// Output types currently attached to `streamAdapter`, so teardown can
+    /// remove exactly what was added (best-effort) before releasing.
+    private var attachedOutputs: [SCStreamOutputType] = []
+    /// Injectable for tests — a fake can throw at add/start/stop to exercise the
+    /// rollback/cleanup paths without live capture. Production builds a real
+    /// SCStream-backed adapter.
+    var streamAdapterFactory: (SCContentFilter, SCStreamConfiguration, SCStreamDelegate) -> ScreenStreamAdapter = {
+        RealSCStreamAdapter(filter: $0, configuration: $1, delegate: $2)
+    }
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
@@ -81,6 +119,16 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var screenAppendFailures: Int = 0
     private var firstAppendFailure: String?
     private var writerHasFailed: Bool = false
+    // Written on the SCK delegate queue, read on the stop() thread → guard with
+    // a lock. `@unchecked Sendable` alone would only hide the data race.
+    private let stopErrorLock = NSLock()
+    private var _streamStopError: Error?
+    private func setStreamStopError(_ e: Error?) {
+        stopErrorLock.lock(); _streamStopError = e; stopErrorLock.unlock()
+    }
+    private func readStreamStopError() -> Error? {
+        stopErrorLock.lock(); defer { stopErrorLock.unlock() }; return _streamStopError
+    }
     private var audioBuffersReceived: Int = 0
     private var audioBuffersNonSilent: Int = 0
     private var displayID: UInt32 = 0
@@ -180,12 +228,29 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                     .uint32Value == display.displayID
             }
             scale = Double(nsScreen?.backingScaleFactor ?? 2.0)
-            // SCDisplay dimensions are already physical pixels. Multiplying
-            // them by backingScaleFactor double-sizes Retina displays and can
-            // exceed VideoToolbox's H.264 limits, producing -12785 append
-            // failures and 0-byte/36-byte screen.mov files.
-            widthPx = display.width
-            heightPx = display.height
+            // Capture at the display's TRUE physical (framebuffer) pixels.
+            //
+            // `SCDisplay.width/height` is documented in *points*, and on this
+            // macOS (14.6.1) it returns points too — e.g. 1512×982 for a 14"
+            // Retina MBP whose real backing store is 3024×1964. Feeding SCK
+            // config.width = 1512 recorded the screen at HALF resolution, so
+            // playback on a Retina panel looked soft (the "quality is worse
+            // than Cap/Screen Studio" symptom). An earlier revision instead
+            // hard-assumed SCDisplay was already pixels — the opposite error.
+            //
+            // Resolve it unambiguously via CGDisplayCopyDisplayMode's
+            // pixelWidth/pixelHeight (the framebuffer size, version-independent),
+            // and only fall back to points × backingScaleFactor if that's
+            // unavailable. `clampToEncoderLimit` then guards the -12785 /
+            // 0-byte VideoToolbox ceiling the old comment worried about, so we
+            // get full resolution WITHOUT risking the encoder blowup.
+            let physical = Self.physicalPixels(
+                displayID: display.displayID,
+                pointWidth: display.width, pointHeight: display.height,
+                scale: scale
+            )
+            widthPx = physical.0
+            heightPx = physical.1
             filter = SCContentFilter(display: display, excludingWindows: [])
             self.displayOriginPt = nsScreen?.frame.origin ?? .zero
             self.displaySizePt = nsScreen?.frame.size
@@ -286,40 +351,174 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.audioBuffersNonSilent = 0
         self.firstAppendFailure = nil
         self.writerHasFailed = false
+        setStreamStopError(nil)
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
-        if captureSystemAudio {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        // From here the AVAssetWriter is in `.writing`. If SCStream setup or
+        // startCapture throws, we MUST cancel the writer and drop every handle —
+        // otherwise a failed start leaks a live `.writing` AVAssetWriter (and
+        // possibly a half-attached SCStream), which accumulates across retries
+        // and poisons the media subsystem (the real cause behind what looked
+        // like "machine state"). Roll back on any throw, then rethrow.
+        let adapter = streamAdapterFactory(filter, config, self)
+        do {
+            try await attachAndStart(adapter: adapter, captureAudio: captureSystemAudio)
+            self.isRunning = true
+            BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
+        } catch {
+            BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
+            // Best-effort remove the outputs we attached + stop the possibly-
+            // partially-started stream, cancel the writer, drop every handle.
+            await teardownStream(adapter: adapter)
+            writer.cancelWriting()
+            resetHandles()
+            throw error
         }
-        try await stream.startCapture()
-        self.stream = stream
-        self.isRunning = true
-        BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
+    }
+
+    /// Attach the screen (+ optional audio) outputs and start capture on the
+    /// adapter, recording which outputs were added so teardown removes exactly
+    /// those. Extracted + `internal` so a throwing fake adapter can exercise the
+    /// add-output / startCapture failure paths without live capture.
+    func attachAndStart(adapter: ScreenStreamAdapter, captureAudio: Bool) async throws {
+        self.streamAdapter = adapter
+        attachedOutputs = []
+        try adapter.addOutput(self, type: .screen, queue: screenQueue)
+        attachedOutputs.append(.screen)
+        if captureAudio {
+            try adapter.addOutput(self, type: .audio, queue: audioQueue)
+            attachedOutputs.append(.audio)
+        }
+        try await adapter.startCapture()
+    }
+
+    /// Best-effort detach + stop of the stream. Removing outputs first stops new
+    /// sample-handler callbacks from being delivered before we drop the input
+    /// handles (a stopCapture that threw may still be producing frames). Does
+    /// not touch writer/state — the caller owns those.
+    func teardownStream(adapter: ScreenStreamAdapter) async {
+        for type in attachedOutputs { try? adapter.removeOutput(self, type: type) }
+        attachedOutputs = []
+        try? await adapter.stopCapture()
+    }
+
+    // Test-only observers of teardown state.
+    var isCapturing: Bool { isRunning }
+    var hasStreamAdapter: Bool { streamAdapter != nil }
+    var attachedOutputCount: Int { attachedOutputs.count }
+
+    /// Drop every capture handle and return to non-running. Single source of
+    /// truth for teardown so no failure path forgets one. Internal for tests.
+    func resetHandles() {
+        self.streamAdapter = nil
+        self.attachedOutputs = []
+        self.writer = nil
+        self.videoInput = nil
+        self.audioInput = nil
+        self.isRunning = false
+    }
+
+    /// True physical (framebuffer) pixel size of a display, clamped to a safe
+    /// H.264 encoder ceiling and rounded to even dimensions.
+    ///
+    /// `CGDisplayCopyDisplayMode(_:).pixelWidth/pixelHeight` is the framebuffer
+    /// size in real pixels regardless of whether SCK reported points or pixels,
+    /// so it resolves the points-vs-pixels ambiguity that caused half-res
+    /// capture. Falls back to `pointW/H × scale` if the mode is unavailable.
+    static func physicalPixels(
+        displayID: CGDirectDisplayID,
+        pointWidth: Int, pointHeight: Int, scale: Double
+    ) -> (Int, Int) {
+        // ⚠️ REVERTED to the SCDisplay dimensions (the original behaviour).
+        //
+        // History: I "fixed" soft recordings by capturing at the true
+        // framebuffer pixels (CGDisplayCopyDisplayMode → 3024×1964 on a 14"
+        // MBP). That REGRESSED real recordings to -12785 (kVTInvalidSessionErr)
+        // mid-record — SCK's large IOSurface queue + the ~29 Mbps H.264 stream +
+        // the concurrent webcam/mic sessions tip the media subsystem over, and
+        // screen.mov comes back corrupt (moov missing) → "couldn't open the
+        // file". The pre-existing code sat at the SCDisplay value precisely to
+        // dodge this (its comment was wrong about *why* — it's points, not
+        // pixels — but the value was proven-safe: real recordings finalized).
+        //
+        // I cannot verify any higher value from here: headless xctest can't
+        // exercise VideoToolbox (it -12785s regardless of resolution, a
+        // window-server-session artifact), and I can't drive the GUI recorder.
+        // So reliability wins — capture at the proven-safe SCDisplay dims. The
+        // crispness improvement is deferred until it can be validated with real
+        // multi-round GUI recordings (screen + webcam + mic).
+        _ = scale
+        _ = displayID
+        return clampToEncoderLimit(pointWidth, pointHeight)
+    }
+
+    /// Clamp to `maxDimension` on the long edge (preserving aspect) and force
+    /// even width/height. Guards the VideoToolbox -12785 ceiling that produced
+    /// 0-byte/36-byte screen.mov files when dimensions were doubled by mistake.
+    static func clampToEncoderLimit(_ w: Int, _ h: Int, maxDimension: Int = 4096) -> (Int, Int) {
+        var fw = Double(max(w, 2))
+        var fh = Double(max(h, 2))
+        let longEdge = max(fw, fh)
+        if longEdge > Double(maxDimension) {
+            let k = Double(maxDimension) / longEdge
+            fw *= k
+            fh *= k
+        }
+        let ew = (Int(fw.rounded()) >> 1) << 1
+        let eh = (Int(fh.rounded()) >> 1) << 1
+        return (max(ew, 2), max(eh, 2))
     }
 
     public func stop() async throws -> Result {
-        guard isRunning, let stream, let writer, let videoInput else {
+        guard isRunning, let adapter = streamAdapter, let writer, let videoInput else {
             throw ScreenRecorderError.notRunning
         }
-        try await stream.stopCapture()
+        // Always return to a clean non-running state — even if stopCapture or
+        // finalize throws — so a broken stop can't leave a leaked .writing
+        // AVAssetWriter behind.
+        defer { resetHandles() }
+
+        var stopCaptureError: Error?
+        do {
+            try await adapter.stopCapture()
+        } catch {
+            stopCaptureError = error
+        }
+        // Detach outputs so no NEW sample-handler callback is delivered, THEN
+        // drain the callbacks already enqueued on the capture queues, THEN
+        // (later) nil the input handle — three layers so a late frame can't
+        // append to a finished input even if stopCapture threw and the stream
+        // is still producing.
+        for type in attachedOutputs { try? adapter.removeOutput(self, type: type) }
+        attachedOutputs = []
+        screenQueue.sync {}
+        audioQueue.sync {}
+
+        if let stopCaptureError {
+            // Abnormal capture end — don't try to finalize a broken session.
+            writer.cancelWriting()
+            throw ScreenRecorderError.writerFailed(
+                "SCStream stopCapture failed: \(stopCaptureError.localizedDescription)"
+            )
+        }
+
         videoInput.markAsFinished()
         audioInput?.markAsFinished()
         await writer.finishWriting()
         BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
         let writerStatus = writer.status
         let writerError = writer.error
-        self.stream = nil
-        self.writer = nil
-        self.videoInput = nil
-        self.audioInput = nil
-        self.isRunning = false
+        let stopError = readStreamStopError()
 
         if writerStatus == .failed || writerStatus == .cancelled {
             throw ScreenRecorderError.writerFailed(
                 firstAppendFailure
                 ?? writerError?.localizedDescription
                 ?? "AVAssetWriter ended with status \(writerStatus.rawValue)"
+            )
+        }
+        if let stopError {
+            throw ScreenRecorderError.writerFailed(
+                "SCStream stopped with error: \(stopError.localizedDescription)"
             )
         }
         guard screenFramesAppended > 0 else {
@@ -424,6 +623,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
         BSLog.error("SCStream stopped with error: \(error)")
+        // Fold an async SCK stop error into the recorder's failure state so
+        // stop() reports a broken capture instead of silently returning a
+        // partial bundle.
+        setStreamStopError(error)
     }
 
     static func bufferContainsAudio(_ buffer: CMSampleBuffer) -> Bool {

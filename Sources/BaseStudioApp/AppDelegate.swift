@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // launched from `swift run` (SPM binaries default to accessory mode).
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+
+        // Local signed-app E2E gate: when launched with --selftest-record, drive
+        // the real record→stop→reopen→export flow and exit with a JSON report.
+        if #available(macOS 13.0, *) { SelfTest.runIfRequested() }
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {

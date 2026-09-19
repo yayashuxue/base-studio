@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      # Headless-safe tests only. Excluded here, run elsewhere:
+      #  - ExportPipelineE2ETests: VideoToolbox export hangs without a
+      #    window-server session on a headless runner.
+      #  - SnapshotProbeTests / ChromeSnapshotTests: NSHostingView offscreen
+      #    render needs a window-server session.
+      #  - SyntheticRecorderTest / RecordingSmokeTest: self-skip unless
+      #    BS_SYNTH_RECORD / BS_RECORD_SMOKE is set (they need a live encoder
+      #    session). The real recording path is gated by the signed-app
+      #    --selftest-record run on a logged-in machine, not here.
+      - name: Unit tests (headless-safe)
+        run: |
+          swift test \
+            --skip ExportPipelineE2ETests \
+            --skip SnapshotProbeTests \
+            --skip ChromeSnapshotTests
+
+  # Placeholder for the session-bound gate. A self-hosted / GUI-login macOS
+  # runner (or the local pre-merge run) sets these env vars so the concurrent
+  # encoder + full signed-app recording E2E actually exercise VideoToolbox.
+  # Kept separate so the headless job above stays green and fast.
+  recorder-session-tests:
+    runs-on: macos-15
+    if: ${{ vars.HAS_WINDOW_SERVER_SESSION == 'true' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Concurrent-encoder synthetic test
+        env:
+          BS_SYNTH_RECORD: "1"
+        run: swift test --filter SyntheticRecorderTest

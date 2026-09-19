@@ -14,6 +14,7 @@ struct HomeView: View {
     var body: some View {
         HStack(spacing: 0) {
             RecordingsListView(vm: vm)
+            BSHairline(axis: .vertical)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: BS.Space.section) {
@@ -97,19 +98,8 @@ struct HomeView: View {
                     colors: [BS.Color.accent.opacity(0.07), .clear],
                     center: .center, startRadius: 0, endRadius: 280
                 )
-
-                VStack(spacing: BS.Space.snug) {
-                    Image(systemName: target.glyph)
-                        .font(.system(size: 44, weight: .ultraLight))
-                        .foregroundStyle(BS.Color.textSecondary)
-                    Text(target.title)
-                        .font(BS.Font.labelStrong)
-                        .foregroundStyle(BS.Color.textPrimary)
-                    Text(target.subtitle)
-                        .font(BS.Font.mono)
-                        .foregroundStyle(BS.Color.textTertiary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                screenPlaceholder(target)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             // Webcam overlay — a small circle in the corner, like Screen Studio.
@@ -120,6 +110,69 @@ struct HomeView: View {
         }
         .aspectRatio(target.aspect, contentMode: .fit)
         .frame(maxWidth: .infinity)
+    }
+
+    /// Placeholder shown when there's no live thumbnail yet. Three states:
+    /// missing Screen Recording permission (Grant affordance), the selected
+    /// source vanished (Refresh affordance), or simply waiting on the first
+    /// frame (the quiet glyph + label).
+    @ViewBuilder
+    private func screenPlaceholder(_ target: TargetInfo) -> some View {
+        if screenPreview.screenPermissionNeeded {
+            VStack(spacing: BS.Space.snug) {
+                Image(systemName: "rectangle.dashed.badge.record")
+                    .font(.system(size: 40, weight: .ultraLight))
+                    .foregroundStyle(BS.Color.statusWarn)
+                Text("Screen Recording is off")
+                    .font(BS.Font.labelStrong)
+                    .foregroundStyle(BS.Color.textPrimary)
+                Text("Grant it to preview and record this screen.")
+                    .font(BS.Font.caption)
+                    .foregroundStyle(BS.Color.textSecondary)
+                Button {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Text("Open Screen Recording settings")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(BS.Color.accent)
+            }
+        } else if screenPreview.sourceUnavailable {
+            VStack(spacing: BS.Space.snug) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 40, weight: .ultraLight))
+                    .foregroundStyle(BS.Color.statusWarn)
+                Text("Source unavailable")
+                    .font(BS.Font.labelStrong)
+                    .foregroundStyle(BS.Color.textPrimary)
+                Text("The selected screen or window is gone.")
+                    .font(BS.Font.caption)
+                    .foregroundStyle(BS.Color.textSecondary)
+                Button {
+                    Task { await vm.refreshDisplays() }
+                } label: {
+                    Text("Refresh sources")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(BS.Color.accent)
+            }
+        } else {
+            VStack(spacing: BS.Space.snug) {
+                Image(systemName: target.glyph)
+                    .font(.system(size: 44, weight: .ultraLight))
+                    .foregroundStyle(BS.Color.textSecondary)
+                Text(target.title)
+                    .font(BS.Font.labelStrong)
+                    .foregroundStyle(BS.Color.textPrimary)
+                Text(target.subtitle)
+                    .font(BS.Font.mono)
+                    .foregroundStyle(BS.Color.textTertiary)
+            }
+        }
     }
 
     /// Single resolved view of the active capture target. Computed once
@@ -172,7 +225,7 @@ struct HomeView: View {
 
     @ViewBuilder
     private var webcamOverlay: some View {
-        let size: CGFloat = 96
+        let size: CGFloat = 84
         ZStack {
             Circle()
                 .fill(BS.Color.surface)
@@ -192,7 +245,7 @@ struct HomeView: View {
             }
         }
         .frame(width: size, height: size)
-        .shadow(color: .black.opacity(0.45), radius: 14, x: 0, y: 6)
+        .shadow(color: .black.opacity(0.12), radius: 7, x: 0, y: 2)
     }
 
     private func webcamPreviewOffBadge(size: CGFloat) -> some View {
