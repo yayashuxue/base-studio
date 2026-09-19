@@ -33,6 +33,35 @@ public enum ScreenRecorderError: Error, LocalizedError {
     }
 }
 
+/// Minimal seam over the SCStream operations `ScreenRecorder` drives, so the
+/// failure / cleanup paths (add-output throw, startCapture throw, stopCapture
+/// throw, output-removal on teardown) can be unit-tested with a throwing fake —
+/// no live ScreenCaptureKit capture required. The production impl forwards to a
+/// real `SCStream`; tests inject a fake via `ScreenRecorder.streamAdapterFactory`.
+@available(macOS 13.0, *)
+protocol ScreenStreamAdapter: AnyObject {
+    func addOutput(_ output: SCStreamOutput, type: SCStreamOutputType, queue: DispatchQueue) throws
+    func removeOutput(_ output: SCStreamOutput, type: SCStreamOutputType) throws
+    func startCapture() async throws
+    func stopCapture() async throws
+}
+
+@available(macOS 13.0, *)
+final class RealSCStreamAdapter: ScreenStreamAdapter {
+    private let stream: SCStream
+    init(filter: SCContentFilter, configuration: SCStreamConfiguration, delegate: SCStreamDelegate) {
+        stream = SCStream(filter: filter, configuration: configuration, delegate: delegate)
+    }
+    func addOutput(_ output: SCStreamOutput, type: SCStreamOutputType, queue: DispatchQueue) throws {
+        try stream.addStreamOutput(output, type: type, sampleHandlerQueue: queue)
+    }
+    func removeOutput(_ output: SCStreamOutput, type: SCStreamOutputType) throws {
+        try stream.removeStreamOutput(output, type: type)
+    }
+    func startCapture() async throws { try await stream.startCapture() }
+    func stopCapture() async throws { try await stream.stopCapture() }
+}
+
 /// Whether macOS has granted Screen Recording permission to this app.
 @available(macOS 13.0, *)
 public func hasScreenRecordingPermission() -> Bool {
@@ -66,7 +95,16 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     // Separate queues so audio buffers (~47/sec) don't starve screen frames (~60/sec).
     private let screenQueue = DispatchQueue(label: "BaseStudio.SCKScreen", qos: .userInitiated)
     private let audioQueue = DispatchQueue(label: "BaseStudio.SCKAudio", qos: .userInitiated)
-    private var stream: SCStream?
+    private var streamAdapter: ScreenStreamAdapter?
+    /// Output types currently attached to `streamAdapter`, so teardown can
+    /// remove exactly what was added (best-effort) before releasing.
+    private var attachedOutputs: [SCStreamOutputType] = []
+    /// Injectable for tests — a fake can throw at add/start/stop to exercise the
+    /// rollback/cleanup paths without live capture. Production builds a real
+    /// SCStream-backed adapter.
+    var streamAdapterFactory: (SCContentFilter, SCStreamConfiguration, SCStreamDelegate) -> ScreenStreamAdapter = {
+        RealSCStreamAdapter(filter: $0, configuration: $1, delegate: $2)
+    }
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
@@ -321,33 +359,58 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // possibly a half-attached SCStream), which accumulates across retries
         // and poisons the media subsystem (the real cause behind what looked
         // like "machine state"). Roll back on any throw, then rethrow.
-        var partialStream: SCStream?
+        let adapter = streamAdapterFactory(filter, config, self)
         do {
-            let stream = SCStream(filter: filter, configuration: config, delegate: self)
-            partialStream = stream
-            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
-            if captureSystemAudio {
-                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-            }
-            try await stream.startCapture()
-            self.stream = stream
+            try await attachAndStart(adapter: adapter, captureAudio: captureSystemAudio)
             self.isRunning = true
             BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
         } catch {
             BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
-            // best-effort teardown of a possibly-partially-started stream, then
-            // cancel the writer and drop every handle so nothing leaks.
-            if let partialStream { try? await partialStream.stopCapture() }
+            // Best-effort remove the outputs we attached + stop the possibly-
+            // partially-started stream, cancel the writer, drop every handle.
+            await teardownStream(adapter: adapter)
             writer.cancelWriting()
             resetHandles()
             throw error
         }
     }
 
+    /// Attach the screen (+ optional audio) outputs and start capture on the
+    /// adapter, recording which outputs were added so teardown removes exactly
+    /// those. Extracted + `internal` so a throwing fake adapter can exercise the
+    /// add-output / startCapture failure paths without live capture.
+    func attachAndStart(adapter: ScreenStreamAdapter, captureAudio: Bool) async throws {
+        self.streamAdapter = adapter
+        attachedOutputs = []
+        try adapter.addOutput(self, type: .screen, queue: screenQueue)
+        attachedOutputs.append(.screen)
+        if captureAudio {
+            try adapter.addOutput(self, type: .audio, queue: audioQueue)
+            attachedOutputs.append(.audio)
+        }
+        try await adapter.startCapture()
+    }
+
+    /// Best-effort detach + stop of the stream. Removing outputs first stops new
+    /// sample-handler callbacks from being delivered before we drop the input
+    /// handles (a stopCapture that threw may still be producing frames). Does
+    /// not touch writer/state — the caller owns those.
+    func teardownStream(adapter: ScreenStreamAdapter) async {
+        for type in attachedOutputs { try? adapter.removeOutput(self, type: type) }
+        attachedOutputs = []
+        try? await adapter.stopCapture()
+    }
+
+    // Test-only observers of teardown state.
+    var isCapturing: Bool { isRunning }
+    var hasStreamAdapter: Bool { streamAdapter != nil }
+    var attachedOutputCount: Int { attachedOutputs.count }
+
     /// Drop every capture handle and return to non-running. Single source of
-    /// truth for teardown so no failure path forgets one.
-    private func resetHandles() {
-        self.stream = nil
+    /// truth for teardown so no failure path forgets one. Internal for tests.
+    func resetHandles() {
+        self.streamAdapter = nil
+        self.attachedOutputs = []
         self.writer = nil
         self.videoInput = nil
         self.audioInput = nil
@@ -406,7 +469,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     }
 
     public func stop() async throws -> Result {
-        guard isRunning, let stream, let writer, let videoInput else {
+        guard isRunning, let adapter = streamAdapter, let writer, let videoInput else {
             throw ScreenRecorderError.notRunning
         }
         // Always return to a clean non-running state — even if stopCapture or
@@ -416,13 +479,17 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
         var stopCaptureError: Error?
         do {
-            try await stream.stopCapture()
+            try await adapter.stopCapture()
         } catch {
             stopCaptureError = error
         }
-        // Drain sample-handler callbacks already enqueued on the capture queues
-        // BEFORE marking inputs finished (a late callback appending to a
-        // finished input fails the writer). Runs even if stopCapture threw.
+        // Detach outputs so no NEW sample-handler callback is delivered, THEN
+        // drain the callbacks already enqueued on the capture queues, THEN
+        // (later) nil the input handle — three layers so a late frame can't
+        // append to a finished input even if stopCapture threw and the stream
+        // is still producing.
+        for type in attachedOutputs { try? adapter.removeOutput(self, type: type) }
+        attachedOutputs = []
         screenQueue.sync {}
         audioQueue.sync {}
 
