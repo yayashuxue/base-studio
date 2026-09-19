@@ -81,7 +81,16 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var screenAppendFailures: Int = 0
     private var firstAppendFailure: String?
     private var writerHasFailed: Bool = false
-    private var streamStopError: Error?
+    // Written on the SCK delegate queue, read on the stop() thread → guard with
+    // a lock. `@unchecked Sendable` alone would only hide the data race.
+    private let stopErrorLock = NSLock()
+    private var _streamStopError: Error?
+    private func setStreamStopError(_ e: Error?) {
+        stopErrorLock.lock(); _streamStopError = e; stopErrorLock.unlock()
+    }
+    private func readStreamStopError() -> Error? {
+        stopErrorLock.lock(); defer { stopErrorLock.unlock() }; return _streamStopError
+    }
     private var audioBuffersReceived: Int = 0
     private var audioBuffersNonSilent: Int = 0
     private var displayID: UInt32 = 0
@@ -304,7 +313,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.audioBuffersNonSilent = 0
         self.firstAppendFailure = nil
         self.writerHasFailed = false
-        self.streamStopError = nil
+        setStreamStopError(nil)
 
         // From here the AVAssetWriter is in `.writing`. If SCStream setup or
         // startCapture throws, we MUST cancel the writer and drop every handle —
@@ -312,8 +321,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // possibly a half-attached SCStream), which accumulates across retries
         // and poisons the media subsystem (the real cause behind what looked
         // like "machine state"). Roll back on any throw, then rethrow.
+        var partialStream: SCStream?
         do {
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            partialStream = stream
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
             if captureSystemAudio {
                 try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
@@ -324,14 +335,23 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
         } catch {
             BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
+            // best-effort teardown of a possibly-partially-started stream, then
+            // cancel the writer and drop every handle so nothing leaks.
+            if let partialStream { try? await partialStream.stopCapture() }
             writer.cancelWriting()
-            self.writer = nil
-            self.videoInput = nil
-            self.audioInput = nil
-            self.stream = nil
-            self.isRunning = false
+            resetHandles()
             throw error
         }
+    }
+
+    /// Drop every capture handle and return to non-running. Single source of
+    /// truth for teardown so no failure path forgets one.
+    private func resetHandles() {
+        self.stream = nil
+        self.writer = nil
+        self.videoInput = nil
+        self.audioInput = nil
+        self.isRunning = false
     }
 
     /// True physical (framebuffer) pixel size of a display, clamped to a safe
@@ -389,25 +409,38 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         guard isRunning, let stream, let writer, let videoInput else {
             throw ScreenRecorderError.notRunning
         }
-        try await stream.stopCapture()
+        // Always return to a clean non-running state — even if stopCapture or
+        // finalize throws — so a broken stop can't leave a leaked .writing
+        // AVAssetWriter behind.
+        defer { resetHandles() }
+
+        var stopCaptureError: Error?
+        do {
+            try await stream.stopCapture()
+        } catch {
+            stopCaptureError = error
+        }
         // Drain sample-handler callbacks already enqueued on the capture queues
-        // BEFORE marking inputs finished — a late callback appending to a
-        // finished AVAssetWriterInput crashes / fails the writer. A sync barrier
-        // on each serial queue blocks until the in-flight ones complete.
+        // BEFORE marking inputs finished (a late callback appending to a
+        // finished input fails the writer). Runs even if stopCapture threw.
         screenQueue.sync {}
         audioQueue.sync {}
+
+        if let stopCaptureError {
+            // Abnormal capture end — don't try to finalize a broken session.
+            writer.cancelWriting()
+            throw ScreenRecorderError.writerFailed(
+                "SCStream stopCapture failed: \(stopCaptureError.localizedDescription)"
+            )
+        }
+
         videoInput.markAsFinished()
         audioInput?.markAsFinished()
         await writer.finishWriting()
         BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
         let writerStatus = writer.status
         let writerError = writer.error
-        let stopError = streamStopError
-        self.stream = nil
-        self.writer = nil
-        self.videoInput = nil
-        self.audioInput = nil
-        self.isRunning = false
+        let stopError = readStreamStopError()
 
         if writerStatus == .failed || writerStatus == .cancelled {
             throw ScreenRecorderError.writerFailed(
@@ -526,7 +559,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // Fold an async SCK stop error into the recorder's failure state so
         // stop() reports a broken capture instead of silently returning a
         // partial bundle.
-        streamStopError = error
+        setStreamStopError(error)
     }
 
     static func bufferContainsAudio(_ buffer: CMSampleBuffer) -> Bool {
