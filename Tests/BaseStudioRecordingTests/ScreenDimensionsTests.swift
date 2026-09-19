@@ -18,22 +18,10 @@ final class ScreenDimensionsTests: XCTestCase {
         XCTAssertEqual(h, 1964)
     }
 
-    func testScreenCaptureCapsNativeRetinaForReliability() {
-        // Real screen capture uses the conservative screenCaptureMaxDimension
-        // (not the raw 4096) because full 3024×1964 regressed recordings to
-        // -12785 mid-record. 3024×1964 must clamp to <= that ceiling, aspect
-        // preserved, even dims.
-        let cap = ScreenRecorder.screenCaptureMaxDimension
-        XCTAssertLessThanOrEqual(cap, 2048, "screen cap should stay conservative")
-        let (w, h) = ScreenRecorder.clampToEncoderLimit(3024, 1964, maxDimension: cap)
-        XCTAssertEqual(max(w, h), cap)
-        XCTAssertEqual(w % 2, 0)
-        XCTAssertEqual(h % 2, 0)
-        // Still a real improvement over the old logical 1512 width.
-        XCTAssertGreaterThan(w, 1512)
-        // Aspect preserved.
-        XCTAssertEqual(Double(w) / Double(h), 3024.0 / 1964.0, accuracy: 0.01)
-    }
+    // NOTE: screen capture reverted to the SCDisplay dims (proven-safe against
+    // -12785); the framebuffer-pixel upscaling is deferred until validatable
+    // with real GUI recordings. clampToEncoderLimit remains the general encoder
+    // guard, tested above/below.
 
     func testOddDimensionsRoundedToEven() {
         // H.264 requires even dimensions; an odd input must be rounded down.

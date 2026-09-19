@@ -326,32 +326,28 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         displayID: CGDirectDisplayID,
         pointWidth: Int, pointHeight: Int, scale: Double
     ) -> (Int, Int) {
-        var w = 0
-        var h = 0
-        if let mode = CGDisplayCopyDisplayMode(displayID) {
-            w = mode.pixelWidth
-            h = mode.pixelHeight
-        }
-        if w <= 0 || h <= 0 {
-            // Fallback: SCDisplay values are points on this OS, so scale up.
-            w = Int((Double(pointWidth) * scale).rounded())
-            h = Int((Double(pointHeight) * scale).rounded())
-        }
-        // ⚠️ Reliability cap. Capturing at the FULL native 3024×1964 (14" MBP)
-        // regressed real recordings to -12785 (kVTInvalidSessionErr): SCK's
-        // large IOSurface queue + the 29 Mbps H.264 stream + the concurrent
-        // webcam/mic capture sessions tip the media subsystem over mid-record,
-        // corrupting screen.mov. (Isolated H.264 encoding at 3024 is fine — it's
-        // the full concurrent capture stack that fails.) The old code sat at the
-        // logical 1512 to dodge this; 1920 is a middle ground — ~1.6× the pixels
-        // of 1512 (visibly crisper) while staying well inside the encoder budget
-        // alongside a webcam. Raise only with real multi-round recording proof.
-        return clampToEncoderLimit(w, h, maxDimension: Self.screenCaptureMaxDimension)
+        // ⚠️ REVERTED to the SCDisplay dimensions (the original behaviour).
+        //
+        // History: I "fixed" soft recordings by capturing at the true
+        // framebuffer pixels (CGDisplayCopyDisplayMode → 3024×1964 on a 14"
+        // MBP). That REGRESSED real recordings to -12785 (kVTInvalidSessionErr)
+        // mid-record — SCK's large IOSurface queue + the ~29 Mbps H.264 stream +
+        // the concurrent webcam/mic sessions tip the media subsystem over, and
+        // screen.mov comes back corrupt (moov missing) → "couldn't open the
+        // file". The pre-existing code sat at the SCDisplay value precisely to
+        // dodge this (its comment was wrong about *why* — it's points, not
+        // pixels — but the value was proven-safe: real recordings finalized).
+        //
+        // I cannot verify any higher value from here: headless xctest can't
+        // exercise VideoToolbox (it -12785s regardless of resolution, a
+        // window-server-session artifact), and I can't drive the GUI recorder.
+        // So reliability wins — capture at the proven-safe SCDisplay dims. The
+        // crispness improvement is deferred until it can be validated with real
+        // multi-round GUI recordings (screen + webcam + mic).
+        _ = scale
+        _ = displayID
+        return clampToEncoderLimit(pointWidth, pointHeight)
     }
-
-    /// Long-edge ceiling for screen capture. Conservative on purpose — see the
-    /// -12785 note in `physicalPixels`.
-    static let screenCaptureMaxDimension = 1920
 
     /// Clamp to `maxDimension` on the long edge (preserving aspect) and force
     /// even width/height. Guards the VideoToolbox -12785 ceiling that produced
