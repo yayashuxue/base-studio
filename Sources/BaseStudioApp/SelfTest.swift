@@ -90,9 +90,12 @@ enum SelfTest {
                 let sz = (try? await t.load(.naturalSize)) ?? .zero
                 r.screenDims = "\(Int(sz.width))x\(Int(sz.height))"
             }
-            // Webcam + mic tracks non-empty.
-            r.webcamTrack = trackNonEmpty(bundle.url.appendingPathComponent("webcam.mov"), .video)
-            r.micTrack = trackNonEmpty(bundle.url.appendingPathComponent("mic.m4a"), .audio)
+            // Webcam + mic tracks present AND with real duration (not just an
+            // empty header). Fully async — NO DispatchSemaphore on the main
+            // actor (that deadlocks the instant a real recording succeeds and
+            // reaches this check, so the report would never come out).
+            r.webcamTrack = await trackPlayable(bundle.url.appendingPathComponent("webcam.mov"), .video)
+            r.micTrack = await trackPlayable(bundle.url.appendingPathComponent("mic.m4a"), .audio)
 
             // Reopen through the real editor loader.
             do {
@@ -120,9 +123,10 @@ enum SelfTest {
                 ))
                 let asset = AVURLAsset(url: url)
                 let vids = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+                report.exportDurationSec = (try? await asset.load(.duration).seconds) ?? 0
                 report.exportOk = !vids.isEmpty
                     && FileManager.default.fileExists(atPath: url.path)
-                report.exportDurationSec = (try? await asset.load(.duration).seconds) ?? 0
+                    && report.exportDurationSec > 0.5
             } catch {
                 report.exportOk = false
                 report.exportError = "\(error)"
@@ -132,18 +136,13 @@ enum SelfTest {
         report.pass = report.runs.allSatisfy { $0.pass } && report.exportOk
     }
 
-    private static func trackNonEmpty(_ url: URL, _ type: AVMediaType) -> Bool {
+    private static func trackPlayable(_ url: URL, _ type: AVMediaType) async -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let asset = AVURLAsset(url: url)
-        let sem = DispatchSemaphore(value: 0)
-        var ok = false
-        Task {
-            let tracks = (try? await asset.loadTracks(withMediaType: type)) ?? []
-            ok = !tracks.isEmpty
-            sem.signal()
-        }
-        sem.wait()
-        return ok
+        let tracks = (try? await asset.loadTracks(withMediaType: type)) ?? []
+        guard !tracks.isEmpty else { return false }
+        let dur = (try? await asset.load(.duration).seconds) ?? 0
+        return dur > 1.0
     }
 
     private static func recordingsDir() throws -> URL {
