@@ -42,6 +42,9 @@ struct ContentView: View {
         }
         .preferredColorScheme(.light)
         .onAppear {
+            // The E2E self-test drives its own camera capture; don't let the UI
+            // preview grab the camera too (two AVCaptureSessions collide).
+            if #available(macOS 13.0, *), SelfTest.isRequested { return }
             vm.webcamPreview = webcamPreview
             vm.showWebcamPreview = true
             if shouldRunWebcamPreview {
