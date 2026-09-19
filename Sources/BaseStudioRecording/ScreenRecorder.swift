@@ -81,6 +81,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var screenAppendFailures: Int = 0
     private var firstAppendFailure: String?
     private var writerHasFailed: Bool = false
+    private var streamStopError: Error?
     private var audioBuffersReceived: Int = 0
     private var audioBuffersNonSilent: Int = 0
     private var displayID: UInt32 = 0
@@ -303,16 +304,34 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.audioBuffersNonSilent = 0
         self.firstAppendFailure = nil
         self.writerHasFailed = false
+        self.streamStopError = nil
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
-        if captureSystemAudio {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        // From here the AVAssetWriter is in `.writing`. If SCStream setup or
+        // startCapture throws, we MUST cancel the writer and drop every handle —
+        // otherwise a failed start leaks a live `.writing` AVAssetWriter (and
+        // possibly a half-attached SCStream), which accumulates across retries
+        // and poisons the media subsystem (the real cause behind what looked
+        // like "machine state"). Roll back on any throw, then rethrow.
+        do {
+            let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
+            if captureSystemAudio {
+                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+            }
+            try await stream.startCapture()
+            self.stream = stream
+            self.isRunning = true
+            BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
+        } catch {
+            BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
+            writer.cancelWriting()
+            self.writer = nil
+            self.videoInput = nil
+            self.audioInput = nil
+            self.stream = nil
+            self.isRunning = false
+            throw error
         }
-        try await stream.startCapture()
-        self.stream = stream
-        self.isRunning = true
-        BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
     }
 
     /// True physical (framebuffer) pixel size of a display, clamped to a safe
@@ -371,12 +390,19 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             throw ScreenRecorderError.notRunning
         }
         try await stream.stopCapture()
+        // Drain sample-handler callbacks already enqueued on the capture queues
+        // BEFORE marking inputs finished — a late callback appending to a
+        // finished AVAssetWriterInput crashes / fails the writer. A sync barrier
+        // on each serial queue blocks until the in-flight ones complete.
+        screenQueue.sync {}
+        audioQueue.sync {}
         videoInput.markAsFinished()
         audioInput?.markAsFinished()
         await writer.finishWriting()
         BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
         let writerStatus = writer.status
         let writerError = writer.error
+        let stopError = streamStopError
         self.stream = nil
         self.writer = nil
         self.videoInput = nil
@@ -388,6 +414,11 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 firstAppendFailure
                 ?? writerError?.localizedDescription
                 ?? "AVAssetWriter ended with status \(writerStatus.rawValue)"
+            )
+        }
+        if let stopError {
+            throw ScreenRecorderError.writerFailed(
+                "SCStream stopped with error: \(stopError.localizedDescription)"
             )
         }
         guard screenFramesAppended > 0 else {
@@ -492,6 +523,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
         BSLog.error("SCStream stopped with error: \(error)")
+        // Fold an async SCK stop error into the recorder's failure state so
+        // stop() reports a broken capture instead of silently returning a
+        // partial bundle.
+        streamStopError = error
     }
 
     static func bufferContainsAudio(_ buffer: CMSampleBuffer) -> Bool {
