@@ -29,6 +29,16 @@ enum SelfTest {
         return "/tmp/base-studio-selftest.json"
     }
 
+    /// `--selftest-seconds N` (default 4). Long takes + the test-only
+    /// BS_INJECT_SCREEN_FAIL_AT_FRAMES env exercise mid-recording encoder recovery.
+    private static var recordSeconds: Double {
+        if let i = CommandLine.arguments.firstIndex(of: "--selftest-seconds"),
+           i + 1 < CommandLine.arguments.count, let v = Double(CommandLine.arguments[i + 1]) {
+            return max(1, v)
+        }
+        return 4
+    }
+
     static func runIfRequested() {
         guard isRequested else { return }
         Task { @MainActor in
@@ -73,7 +83,7 @@ enum SelfTest {
                 includeWebcam: withWebcam, includeSystemAudio: true, includeMic: withWebcam
             ))
             let bundle = try await session.start(in: dir, name: "selftest-\(i)")
-            try await Task.sleep(nanoseconds: 4_000_000_000)
+            try await Task.sleep(nanoseconds: UInt64(recordSeconds * 1_000_000_000))
             _ = try await session.stop()
             lastBundle = bundle
 
@@ -105,8 +115,11 @@ enum SelfTest {
                 r.openOk = false
                 r.openError = "\(error)"
             }
+            // The screen must cover (almost) the whole take — a recovered
+            // encoder failure may cost < 1 s, never the rest of the take.
+            r.recordSeconds = recordSeconds
             r.pass = !r.failureJson && r.metadata && r.screenTrack
-                && r.screenDurationSec > 1.0 && r.openOk
+                && r.screenDurationSec > max(1.0, recordSeconds - 1.5) && r.openOk
                 && (!withWebcam || (r.webcamTrack && r.micTrack))
             report.runs.append(r)
         }
@@ -178,6 +191,7 @@ enum SelfTest {
         var screenTrack = false
         var screenDims = ""
         var screenDurationSec: Double = 0
+        var recordSeconds: Double = 0
         var webcamTrack = false
         var micTrack = false
         var openOk = false
