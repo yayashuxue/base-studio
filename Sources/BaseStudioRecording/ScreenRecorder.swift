@@ -128,6 +128,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// abandon the current segment at those appended-frame counts as if the
     /// encoder had been invalidated. Never set in normal runs.
     private var injectFailAt: Set<Int> = []
+    /// Test-only (`BS_INJECT_SCREEN_CANCEL_AT_FRAMES`): cancel the writer at
+    /// those counts so it turns `.cancelled` and its input stops being ready —
+    /// the "dead encoder, input never ready" path, which must still roll over.
+    private var injectCancelAt: Set<Int> = []
     public private(set) var screenRecoveryCount: Int = 0
     private let captureSystemAudio: Bool
     private var firstPTS: CMTime?
@@ -318,10 +322,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.recoveries = 0
         self.screenRecoveryCount = 0
         self.lastFailureAt = 0
-        self.injectFailAt = Set(
-            (ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_FAIL_AT_FRAMES"] ?? "")
-                .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        )
+        self.injectFailAt = Self.frameList("BS_INJECT_SCREEN_FAIL_AT_FRAMES")
+        self.injectCancelAt = Self.frameList("BS_INJECT_SCREEN_CANCEL_AT_FRAMES")
         self.writer = writer
         self.videoInput = videoInput
         self.audioInput = audioInput
@@ -359,6 +361,22 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             resetHandles()
             throw error
         }
+    }
+
+    static func frameList(_ env: String) -> Set<Int> {
+        Set((ProcessInfo.processInfo.environment[env] ?? "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+    }
+
+    static func writerIsDead(_ status: AVAssetWriter.Status) -> Bool {
+        status == .failed || status == .cancelled
+    }
+
+    /// The writer/inputs of the *current* segment. A rollover can swap them on
+    /// the screen queue, so stop() must re-read after draining the queues.
+    func currentHandles() -> (AVAssetWriter?, AVAssetWriterInput?, AVAssetWriterInput?) {
+        writerLock.lock(); defer { writerLock.unlock() }
+        return (writer, videoInput, audioInput)
     }
 
     /// Build one started segment writer (H.264 + optional system-audio AAC),
@@ -585,7 +603,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     }
 
     public func stop() async throws -> Result {
-        guard isRunning, let adapter = streamAdapter, let writer, let videoInput else {
+        guard isRunning, let adapter = streamAdapter, writer != nil, videoInput != nil else {
             throw ScreenRecorderError.notRunning
         }
         // Always return to a clean non-running state — even if stopCapture or
@@ -611,12 +629,17 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
         if let stopCaptureError {
             // Abnormal capture end — don't try to finalize a broken session.
-            writer.cancelWriting()
+            currentHandles().0?.cancelWriting()
             throw ScreenRecorderError.writerFailed(
                 "SCStream stopCapture failed: \(stopCaptureError.localizedDescription)"
             )
         }
 
+        // Re-read: a rollover may have happened while stopCapture()/the drain
+        // ran, and that newest segment is the one to finalize.
+        let (curWriter, curVideo, curAudio) = currentHandles()
+        guard let writer = curWriter, let videoInput = curVideo else { throw ScreenRecorderError.notRunning }
+        let audioInput = curAudio
         // The current segment may be healthy (finish it) or dead (leave its
         // fragments alone). Earlier dead segments are already on disk.
         if writer.status == .writing {
@@ -696,6 +719,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 BSLog.warn("videoInput is nil; dropping frame")
                 return
             }
+            // A dead encoder can leave the input permanently "not ready", so the
+            // append-failure branch below would never fire. Check status first.
+            if Self.writerIsDead(writer.status) {
+                rollOverSegment(reason: String(describing: writer.error ?? ScreenRecorderError.writerFailed("writer status \(writer.status.rawValue)")))
+                return
+            }
             guard videoInput.isReadyForMoreMediaData else {
                 screenFramesNotReady += 1
                 if screenFramesNotReady % 60 == 1 {
@@ -721,7 +750,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 let msg = String(describing: writer.error)
                 if firstAppendFailure == nil { firstAppendFailure = msg }
                 BSLog.error("append failed (\(screenAppendFailures)), writer.status=\(writer.status.rawValue), writer.error=\(msg)")
-                if writer.status == .failed || writer.status == .cancelled {
+                if Self.writerIsDead(writer.status) {
                     rollOverSegment(reason: msg)
                 }
                 return
@@ -733,6 +762,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             if injectFailAt.contains(screenFramesAppended) {
                 BSLog.warn("BS_INJECT_SCREEN_FAIL_AT_FRAMES: abandoning segment at frame \(screenFramesAppended)")
                 rollOverSegment(reason: "injected")
+            }
+            if injectCancelAt.contains(screenFramesAppended) {
+                BSLog.warn("BS_INJECT_SCREEN_CANCEL_AT_FRAMES: cancelling writer at frame \(screenFramesAppended)")
+                writer.cancelWriting()
             }
             return
         }
