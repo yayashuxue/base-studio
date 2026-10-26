@@ -268,6 +268,7 @@ public final class ExportPipeline {
             }
         }
 
+        BSLog.info("export video pass: frames=\(frameCount), segIn=\(segInFileTime.seconds), segOut=\(segOutFileTime.seconds), timeline=\(timelineDurationSec), lastTimelinePTS=\(currentTimelinePTS.seconds)")
         videoInput.markAsFinished()
         await writer.finishWriting()
         if writer.status != .completed {

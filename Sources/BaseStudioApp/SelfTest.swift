@@ -87,6 +87,9 @@ enum SelfTest {
             let session = RecordingSession(options: .init(
                 includeWebcam: withWebcam, includeSystemAudio: true, includeMic: withWebcam
             ))
+            // Fresh bundle every run — leftovers from earlier runs (edl.json,
+            // failure.json, exports) made good takes look broken.
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("selftest-\(i).basestudio"))
             let bundle = try await session.start(in: dir, name: "selftest-\(i)")
             try await Task.sleep(nanoseconds: UInt64(recordSeconds * 1_000_000_000))
             _ = try await session.stop()
