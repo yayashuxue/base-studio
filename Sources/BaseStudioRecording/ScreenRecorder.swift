@@ -1,4 +1,5 @@
 import AVFoundation
+import VideoToolbox
 import BaseStudioCore
 import CoreMedia
 import Foundation
@@ -133,6 +134,31 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// the "dead encoder, input never ready" path, which must still roll over.
     private var injectCancelAt: Set<Int> = []
     public private(set) var screenRecoveryCount: Int = 0
+    /// Software H.264 instead of VideoToolbox hardware (experiment: BS_FORCE_SW_ENCODER=1).
+    private var useSoftwareEncoder = ProcessInfo.processInfo.environment["BS_FORCE_SW_ENCODER"] == "1"
+    /// After the first encoder failure, feed the encoder our own copies of
+    /// SCK's frames instead of SCK's IOSurfaces. A degraded capture stack can
+    /// hand out surfaces every encoder session rejects on frame 1 (-12785),
+    /// while the same writer accepts frames from our own pool (verified with
+    /// --selftest-synthetic-writer). Kept as the default; see below.
+    /// Default ON (the zero-copy path died on frame 1 on a real machine while
+    /// copies encoded cleanly); BS_SCREEN_ZERO_COPY=1 restores zero-copy, and
+    /// even then the first encoder failure switches to copies.
+    private var copyFrames = ProcessInfo.processInfo.environment["BS_SCREEN_ZERO_COPY"] != "1"
+    private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var pendingAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var copyDropsNoPool = 0
+    private var copyIdleFrames = 0
+    /// Last frame actually encoded + its time. SCK sends no picture while the
+    /// screen is static, so without a closing frame the video track ended at
+    /// the last *change* (5.2 s of an 8 s take) and export cut the tail —
+    /// audio included. stop() re-appends this frame at the take's end.
+    private var lastEncodedFrame: CVPixelBuffer?
+    private var lastEncodedPTS: CMTime?
+    /// Our own NV12 pool for copied frames — the adaptor's pool stays nil for
+    /// the first seconds of a session, which dropped ~60 % of frames.
+    private var copyPool: CVPixelBufferPool?
+    private var copyDropsAlloc = 0
     private let captureSystemAudio: Bool
     private var firstPTS: CMTime?
     private var firstAudioPTS: CMTime?
@@ -327,6 +353,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.writer = writer
         self.videoInput = videoInput
         self.audioInput = audioInput
+        self.adaptor = pendingAdaptor
         self.firstPTS = nil
         self.firstAudioPTS = nil
         self.lastPTS = nil
@@ -351,7 +378,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         do {
             try await attachAndStart(adapter: adapter, captureAudio: captureSystemAudio)
             self.isRunning = true
-            BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
+            BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio), softwareEncoder=\(useSoftwareEncoder)")
         } catch {
             BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
             // Best-effort remove the outputs we attached + stop the possibly-
@@ -361,6 +388,42 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             resetHandles()
             throw error
         }
+    }
+
+    /// Copy an NV12 (420v) buffer into a fresh buffer from `pool`, plane by
+    /// plane, so the encoder never sees the capture stack's IOSurface.
+    static func copyNV12(_ src: CVPixelBuffer, pool: CVPixelBufferPool?) -> CVPixelBuffer? {
+        guard let pool, CVPixelBufferGetPlaneCount(src) == 2 else { return nil }
+        var out: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let dst = out,
+              CVPixelBufferGetPlaneCount(dst) == 2 else { return nil }
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(dst, [])
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+        }
+        for plane in 0..<2 {
+            guard let s = CVPixelBufferGetBaseAddressOfPlane(src, plane),
+                  let d = CVPixelBufferGetBaseAddressOfPlane(dst, plane) else { return nil }
+            let sRow = CVPixelBufferGetBytesPerRowOfPlane(src, plane)
+            let dRow = CVPixelBufferGetBytesPerRowOfPlane(dst, plane)
+            let rows = min(CVPixelBufferGetHeightOfPlane(src, plane), CVPixelBufferGetHeightOfPlane(dst, plane))
+            let n = min(sRow, dRow)
+            for r in 0..<rows { memcpy(d + r * dRow, s + r * sRow, n) }
+        }
+        return dst
+    }
+
+    static func makeNV12Pool(width: Int, height: Int) -> CVPixelBufferPool? {
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey as String: 8] as CFDictionary, [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ] as CFDictionary, &pool)
+        return pool
     }
 
     static func frameList(_ env: String) -> Set<Int> {
@@ -374,6 +437,11 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     /// The writer/inputs of the *current* segment. A rollover can swap them on
     /// the screen queue, so stop() must re-read after draining the queues.
+    func currentAdaptor() -> AVAssetWriterInputPixelBufferAdaptor? {
+        writerLock.lock(); defer { writerLock.unlock() }
+        return adaptor
+    }
+
     func currentHandles() -> (AVAssetWriter?, AVAssetWriterInput?, AVAssetWriterInput?) {
         writerLock.lock(); defer { writerLock.unlock() }
         return (writer, videoInput, audioInput)
@@ -392,7 +460,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // H.264 for the recorded source. Keep the broadly compatible codec, but
         // pair it with NV12 frames so VideoToolbox does not have to encode
         // SCK's BGRA buffers directly.
-        let videoSettings: [String: Any] = [
+        var videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: widthPx,
             AVVideoHeightKey: heightPx,
@@ -402,12 +470,27 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
             ],
         ]
+        if useSoftwareEncoder {
+            // Hardware H.264 sessions can be dead on arrival (-12785/-16122 on
+            // frame 1) when the media stack is degraded; Apple's software
+            // encoder is slower but independent of that state.
+            videoSettings[AVVideoEncoderSpecificationKey] = [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false,
+            ]
+        }
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
         guard writer.canAdd(videoInput) else {
             throw ScreenRecorderError.writerSetupFailed("cannot add video input")
         }
         writer.add(videoInput)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: widthPx,
+            kCVPixelBufferHeightKey as String: heightPx,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ])
+        self.pendingAdaptor = adaptor
 
         var audioInput: AVAssetWriterInput?
         if captureSystemAudio {
@@ -439,6 +522,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         guard let base = outputURL else { writerHasFailed = true; return }
         recoveries += 1
         lastFailureAt = CFAbsoluteTimeGetCurrent()
+        if !copyFrames {
+            copyFrames = true
+            BSLog.warn("switching screen encoding to copied frames after encoder failure")
+        }
         guard recoveries <= Self.maxRecoveries else {
             BSLog.error("screen encoder failed again (\(reason)); giving up after \(Self.maxRecoveries) recoveries")
             writerHasFailed = true
@@ -450,7 +537,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         do {
             let (w, v, a) = try makeSegmentWriter(url: url)
             writerLock.lock()
-            writer = w; videoInput = v; audioInput = a; sessionStarted = false
+            writer = w; videoInput = v; audioInput = a; adaptor = pendingAdaptor; sessionStarted = false
             segments.append((url, .invalid))
             writerLock.unlock()
             screenRecoveryCount = recoveries
@@ -643,11 +730,20 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // The current segment may be healthy (finish it) or dead (leave its
         // fragments alone). Earlier dead segments are already on disk.
         if writer.status == .writing {
+            // Hold the last picture until the end of the take (see lastEncodedFrame).
+            if let frame = lastEncodedFrame, let at = lastEncodedPTS, let end = lastPTS,
+               sessionStarted, CMTimeCompare(end, at) > 0, let adaptor = currentAdaptor(),
+               videoInput.isReadyForMoreMediaData,
+               let copy = Self.copyNV12(frame, pool: copyPool ?? Self.makeNV12Pool(width: widthPx, height: heightPx)) {
+                if !adaptor.append(copy, withPresentationTime: end) {
+                    BSLog.warn("closing frame not appended: \(String(describing: writer.error))")
+                }
+            }
             videoInput.markAsFinished()
             audioInput?.markAsFinished()
             await writer.finishWriting()
         }
-        BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), segments=\(segments.count), recoveries=\(recoveries), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
+        BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), segments=\(segments.count), recoveries=\(recoveries), copy idle=\(copyIdleFrames) drops(noPool/alloc)=\(copyDropsNoPool)/\(copyDropsAlloc), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
         let stopError = readStreamStopError()
         guard screenFramesAppended > 0, let origin = firstPTS, let outputURL else {
             throw ScreenRecorderError.writerFailed(
@@ -744,7 +840,31 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 BSLog.info("startSession (segment \(segments.count)) at pts=\(pts.seconds), writer.status=\(writer.status.rawValue)")
             }
             lastPTS = pts
-            let ok = videoInput.append(sampleBuffer)
+            let ok: Bool
+            if copyFrames {
+                writerLock.lock(); let adaptor = self.adaptor; writerLock.unlock()
+                if copyPool == nil { copyPool = Self.makeNV12Pool(width: widthPx, height: heightPx) }
+                guard let src = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                    // SCK "idle" frame: the screen didn't change, nothing to encode.
+                    copyIdleFrames += 1
+                    return
+                }
+                guard let adaptor, let pool = copyPool else {
+                    copyDropsNoPool += 1
+                    return
+                }
+                guard let copy = Self.copyNV12(src, pool: pool) else {
+                    copyDropsAlloc += 1
+                    return
+                }
+                ok = adaptor.append(copy, withPresentationTime: pts)
+                if ok { lastEncodedFrame = copy; lastEncodedPTS = pts }
+            } else {
+                ok = videoInput.append(sampleBuffer)
+                if ok, let img = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                    lastEncodedFrame = img; lastEncodedPTS = pts
+                }
+            }
             if !ok {
                 screenAppendFailures += 1
                 let msg = String(describing: writer.error)

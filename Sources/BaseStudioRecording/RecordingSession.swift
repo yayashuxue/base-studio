@@ -102,6 +102,9 @@ public final class RecordingSession {
         guard state == .idle else { throw RecordingSessionError.alreadyRunning }
         let bundle = try ProjectBundle.create(in: directory, name: name)
         self.bundle = bundle
+        // A reused bundle name must not inherit a previous take's failure
+        // record — it would mark this take as failed before it even starts.
+        try? FileManager.default.removeItem(at: bundle.failureURL)
         state = .recording
 
         cursorRecorder.start()

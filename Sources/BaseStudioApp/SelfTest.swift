@@ -58,6 +58,11 @@ enum SelfTest {
 
     @MainActor
     private static func run(into report: inout Report) async throws {
+        if CommandLine.arguments.contains("--selftest-synthetic-writer") {
+            report.syntheticWriter = await syntheticWriterProbe()
+            report.pass = report.syntheticWriter?.hasPrefix("ok") == true
+            return
+        }
         let dir = try recordingsDir()
         var lastBundle: ProjectBundle?
 
@@ -174,6 +179,54 @@ enum SelfTest {
         }
     }
 
+    /// Isolates "is the encoder/writer broken in this process?" from "are the
+    /// SCK buffers bad?": 3 s of 1512x982 NV12 frames drawn on the CPU, same
+    /// settings as the screen recorder, then finishWriting.
+    static func syntheticWriterProbe() async -> String {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bs-synth-\(UUID().uuidString).mov")
+        let w = 1512, h = 982, fps = 60
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return "fail: writer init" }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h,
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: max(8_000_000, w * h * fps / 12),
+                                              AVVideoMaxKeyFrameIntervalKey: fps * 2,
+                                              AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel],
+        ])
+        input.expectsMediaDataInRealTime = true
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ])
+        writer.add(input)
+        guard writer.startWriting() else { return "fail: startWriting \(String(describing: writer.error))" }
+        writer.startSession(atSourceTime: .zero)
+        var appended = 0
+        for i in 0..<(fps * 3) {
+            while !input.isReadyForMoreMediaData { try? await Task.sleep(nanoseconds: 2_000_000) }
+            guard let pool = adaptor.pixelBufferPool else { return "fail: no pool, status=\(writer.status.rawValue) \(String(describing: writer.error))" }
+            var pb: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
+            guard let pb else { return "fail: no buffer" }
+            CVPixelBufferLockBaseAddress(pb, [])
+            if let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0) {
+                memset(y, Int32(16 + (i * 3) % 200), CVPixelBufferGetBytesPerRowOfPlane(pb, 0) * h)
+            }
+            if let uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1) {
+                memset(uv, 128, CVPixelBufferGetBytesPerRowOfPlane(pb, 1) * h / 2)
+            }
+            CVPixelBufferUnlockBaseAddress(pb, [])
+            if !adaptor.append(pb, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps))) {
+                return "fail: append at frame \(i), status=\(writer.status.rawValue) \(String(describing: writer.error))"
+            }
+            appended += 1
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        defer { try? FileManager.default.removeItem(at: url) }
+        return writer.status == .completed ? "ok: \(appended) frames finalized" : "fail: finish status=\(writer.status.rawValue) \(String(describing: writer.error))"
+    }
+
     struct Report: Codable {
         var runs: [RunResult] = []
         var exportOk = false
@@ -181,6 +234,9 @@ enum SelfTest {
         var exportError: String?
         var error: String?
         var pass = false
+        /// `--selftest-synthetic-writer`: same H.264 writer settings fed with
+        /// CPU-made NV12 frames instead of ScreenCaptureKit buffers.
+        var syntheticWriter: String?
     }
 
     struct RunResult: Codable {
