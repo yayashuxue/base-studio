@@ -460,6 +460,19 @@ public final class ExportPipeline {
         guard writer.status == .completed else {
             throw ExportError.writerSetupFailed("mux failed: \(String(describing: writer.error))")
         }
+        // The .mp4 writer keeps the priming trim only as a sample attachment
+        // (Apple players honour it, ffmpeg-based ones don't: they played the
+        // 2112 priming samples and ran audio 44 ms late). The .m4a pass carries
+        // the standard iTunSMPB tag both understand; copy it over.
+        if aTrack != nil {
+            let finalAudio = try? await AVURLAsset(url: output).loadTracks(withMediaType: .audio).first?.load(.timeRange)
+            let samples = finalAudio.map { Int64(($0.duration.seconds * 48_000).rounded()) }
+            do {
+                try ITunSMPB.copy(from: audio, into: output, validSamples: samples)
+            } catch {
+                BSLog.warn("could not tag AAC priming in export (ffmpeg players may hear audio ~44 ms late): \(error)")
+            }
+        }
     }
 
     /// Wait for the encoder to take more input — but never forever. A dead

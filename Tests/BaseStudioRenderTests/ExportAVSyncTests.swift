@@ -33,7 +33,7 @@ final class ExportAVSyncTests: XCTestCase {
             "-vf", "drawbox=c=white:t=fill:enable='lt(mod(t\\,1)\\,0.067)*gte(t\\,0.5)'",
             "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30",
             "-c:a", "aac", "-ac", "2", bundle.appendingPathComponent("screen.mov").path])
-        let srcOffsets = try await offsets(ffmpeg, bundle.appendingPathComponent("screen.mov"))
+        let srcOffsets = try await offsets(ffmpeg, bundle.appendingPathComponent("screen.mov"), appleAudio: true)
         XCTAssertEqual(srcOffsets.count, 3, "fixture should have 3 flash/click pairs: \(srcOffsets)")
         for o in srcOffsets { XCTAssertEqual(o, 0, accuracy: 15, "fixture itself out of sync: \(srcOffsets)") }
 
@@ -43,17 +43,20 @@ final class ExportAVSyncTests: XCTestCase {
             project: makeProject(), bundleURL: bundle, outputURL: out,
             fps: 30, bitrate: 4_000_000, audioMode: .systemOnly))
 
-        let outOffsets = try await offsets(ffmpeg, out)
-        XCTAssertEqual(outOffsets.count, 3, "export lost flash/click pairs: \(outOffsets)")
-        for o in outOffsets {
-            XCTAssertEqual(o, 0, accuracy: 15, "audio shifted against picture by \(o) ms after export (all: \(outOffsets))")
+        // Both decoders must agree: Apple (QuickTime) and ffmpeg (what most
+        // upload pipelines use). The ffmpeg side was 44 ms late until the AAC
+        // priming tag was carried into the mp4.
+        for (name, useApple) in [("Apple", true), ("ffmpeg", false)] {
+            let o = try await offsets(ffmpeg, out, appleAudio: useApple)
+            XCTAssertEqual(o.count, 3, "\(name): export lost flash/click pairs: \(o)")
+            for x in o { XCTAssertEqual(x, 0, accuracy: 15, "\(name): audio off by \(x) ms after export (all: \(o))") }
         }
     }
 
     // MARK: - measurement
 
     /// Click onset minus flash onset (ms) for each pair.
-    private func offsets(_ ffmpeg: String, _ url: URL) async throws -> [Double] {
+    private func offsets(_ ffmpeg: String, _ url: URL, appleAudio: Bool) async throws -> [Double] {
         // Flash onsets: per-frame mean luma, rising edge over 128.
         let v = try run(ffmpeg, ["-v", "info", "-i", url.path, "-map", "0:v",
                                  "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG",
@@ -71,7 +74,14 @@ final class ExportAVSyncTests: XCTestCase {
         // players use; it honours the AAC priming trim). ffmpeg does not honour
         // the trim AVAssetWriter writes into the exported .mp4 and reads the
         // audio 44 ms late — see the note in ExportPipeline.mux.
-        let samples = try await decodeMonoPCM(url)
+        let samples: [Float]
+        if appleAudio {
+            samples = try await decodeMonoPCM(url)
+        } else {
+            let pcm = try runData(ffmpeg, ["-v", "error", "-i", url.path, "-map", "0:a", "-ac", "1",
+                                           "-ar", "48000", "-f", "f32le", "-"])
+            samples = pcm.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        }
         var clicks: [Double] = []; var last = -9.0
         var i = 0
         while i + 48 <= samples.count {
