@@ -272,6 +272,9 @@ public final class ExportPipeline {
 
         BSLog.info("export video pass: frames=\(frameCount), segIn=\(segInFileTime.seconds), segOut=\(segOutFileTime.seconds), timeline=\(timelineDurationSec), lastTimelinePTS=\(currentTimelinePTS.seconds)")
         videoInput.markAsFinished()
+        // Same reason as the recorder: pin the end, don't let the last
+        // frame's duration be guessed from the previous gap.
+        writer.endSession(atSourceTime: CMTime(seconds: timelineDurationSec, preferredTimescale: 600))
         await writer.finishWriting()
         if writer.status != .completed {
             throw ExportError.writerSetupFailed(
@@ -467,10 +470,12 @@ public final class ExportPipeline {
         if aTrack != nil {
             let finalAudio = try? await AVURLAsset(url: output).loadTracks(withMediaType: .audio).first?.load(.timeRange)
             let samples = finalAudio.map { Int64(($0.duration.seconds * 48_000).rounded()) }
+            // Fail the export rather than ship a file ffmpeg players hear 44 ms late.
             do {
                 try ITunSMPB.copy(from: audio, into: output, validSamples: samples)
             } catch {
-                BSLog.warn("could not tag AAC priming in export (ffmpeg players may hear audio ~44 ms late): \(error)")
+                try? FileManager.default.removeItem(at: output)
+                throw ExportError.writerSetupFailed("could not tag AAC priming in export: \(error)")
             }
         }
     }

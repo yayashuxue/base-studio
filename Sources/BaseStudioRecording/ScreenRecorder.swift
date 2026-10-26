@@ -764,6 +764,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             }
             videoInput.markAsFinished()
             audioInput?.markAsFinished()
+            // End the track at the take's end. Otherwise the last frame's
+            // duration defaults to the previous gap — after a static stretch
+            // that doubled the track (60 s take → 119 s screen.mov).
+            if sessionStarted, let end = lastPTS {
+                writer.endSession(atSourceTime: CMTimeAdd(end, CMTime(value: 1, timescale: CMTimeScale(fps))))
+            }
             await writer.finishWriting()
         }
         BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), segments=\(segments.count), recoveries=\(recoveries), copy idle=\(copyIdleFrames) drops(noPool/alloc)=\(copyDropsNoPool)/\(copyDropsAlloc), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")

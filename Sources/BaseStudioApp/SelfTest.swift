@@ -174,7 +174,9 @@ enum SelfTest {
             // encoder failure may cost < 1 s, never the rest of the take.
             r.recordSeconds = recordSeconds
             r.pass = !r.failureJson && r.metadata && r.screenTrack
-                && r.screenDurationSec > max(1.0, recordSeconds - 1.5) && r.openOk
+                && r.screenDurationSec > max(1.0, recordSeconds - 1.5)
+                && r.screenDurationSec < recordSeconds + 3   // too long is a bug too (60 s take → 119 s)
+                && r.openOk
                 && (!withWebcam || (r.webcamTrack && r.micTrack))
             if exportEach {
                 do {
@@ -188,7 +190,7 @@ enum SelfTest {
                 } catch {
                     r.exportError = "\(error)"
                 }
-                r.pass = r.pass && r.exportSec > max(1.0, recordSeconds - 1.5)
+                r.pass = r.pass && r.exportSec > max(1.0, recordSeconds - 1.5) && r.exportSec < recordSeconds + 3
             }
             report.runs.append(r)
         }
