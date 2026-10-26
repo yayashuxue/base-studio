@@ -106,8 +106,10 @@ public final class ExportPipeline {
         let videoTmpURL = workDir.appendingPathComponent(".export-video-\(UUID().uuidString).mp4")
         let audioTmpURL = workDir.appendingPathComponent(".export-audio-\(UUID().uuidString).m4a")
         defer {
-            try? FileManager.default.removeItem(at: videoTmpURL)
-            try? FileManager.default.removeItem(at: audioTmpURL)
+            if ProcessInfo.processInfo.environment["BS_KEEP_EXPORT_TEMPS"] == nil {
+                try? FileManager.default.removeItem(at: videoTmpURL)
+                try? FileManager.default.removeItem(at: audioTmpURL)
+            }
         }
         let writer: AVAssetWriter
         do {
@@ -378,36 +380,85 @@ public final class ExportPipeline {
     }
 
     /// Combine the video-only and audio-only passes into the final .mp4
-    /// without re-encoding.
+    /// without re-encoding: copy compressed samples through a passthrough
+    /// AVAssetWriter. AVAssetExportSession passthrough dropped the AAC priming
+    /// trim (2112 samples), playing the priming as content — export audio
+    /// came out 44 ms late. The writer keeps the trim attachment the first
+    /// audio sample carries. Both inputs are fed from their own
+    /// requestMediaDataWhenReady callbacks so interleaving can't deadlock.
     static func mux(video: URL, audio: URL?, into output: URL) async throws {
         try? FileManager.default.removeItem(at: output)
         guard let audio else {
             try FileManager.default.moveItem(at: video, to: output)
             return
         }
-        let comp = AVMutableComposition()
         let vAsset = AVURLAsset(url: video)
-        guard let v = try await vAsset.loadTracks(withMediaType: .video).first,
-              let vc = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
-        else { throw ExportError.writerSetupFailed("mux: no video track") }
-        let vRange = try await v.load(.timeRange)
-        try vc.insertTimeRange(vRange, of: v, at: .zero)
         let aAsset = AVURLAsset(url: audio)
-        if let a = try await aAsset.loadTracks(withMediaType: .audio).first,
-           let ac = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            let aRange = try await a.load(.timeRange)
+        guard let vTrack = try await vAsset.loadTracks(withMediaType: .video).first else {
+            throw ExportError.writerSetupFailed("mux: no video track")
+        }
+        let vDuration = try await vAsset.load(.duration)
+        let aTrack = try await aAsset.loadTracks(withMediaType: .audio).first
+        let vFormat = try await vTrack.load(.formatDescriptions).first
+        let vTransform = try await vTrack.load(.preferredTransform)
+
+        let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: vFormat)
+        vIn.transform = vTransform
+        writer.add(vIn)
+        var pairs: [(AVAssetReaderTrackOutput, AVAssetWriterInput, AVAssetReader, CMTime?)] = []
+        let vReader = try AVAssetReader(asset: vAsset)
+        let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: nil)
+        vReader.add(vOut)
+        pairs.append((vOut, vIn, vReader, nil))
+        if let aTrack {
+            let aFormat = try await aTrack.load(.formatDescriptions).first
+            let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: aFormat)
+            writer.add(aIn)
+            let aReader = try AVAssetReader(asset: aAsset)
+            let aOut = AVAssetReaderTrackOutput(track: aTrack, outputSettings: nil)
+            aReader.add(aOut)
             // Never let audio run past the picture.
-            let dur = CMTimeMinimum(aRange.duration, vRange.duration)
-            try ac.insertTimeRange(CMTimeRange(start: aRange.start, duration: dur), of: a, at: .zero)
+            pairs.append((aOut, aIn, aReader, vDuration))
         }
-        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetPassthrough) else {
-            throw ExportError.writerSetupFailed("mux: no export session")
+        for (_, _, reader, _) in pairs where !reader.startReading() {
+            throw ExportError.writerSetupFailed("mux: reader failed: \(String(describing: reader.error))")
         }
-        export.outputURL = output
-        export.outputFileType = .mp4
-        await export.export()
-        guard export.status == .completed else {
-            throw ExportError.writerSetupFailed("mux failed: \(String(describing: export.error))")
+        guard writer.startWriting() else {
+            throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))")
+        }
+        writer.startSession(atSourceTime: .zero)
+        await withTaskGroup(of: Void.self) { group in
+            for (i, (out, input, _, limit)) in pairs.enumerated() {
+                group.addTask {
+                    await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                        let q = DispatchQueue(label: "BaseStudio.mux.\(i)")
+                        var finished = false
+                        input.requestMediaDataWhenReady(on: q) {
+                            while input.isReadyForMoreMediaData && !finished {
+                                guard let sb = out.copyNextSampleBuffer(),
+                                      limit.map({ CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sb), $0) < 0 }) ?? true
+                                else {
+                                    finished = true
+                                    input.markAsFinished()
+                                    done.resume()
+                                    return
+                                }
+                                if !input.append(sb) {
+                                    finished = true
+                                    input.markAsFinished()
+                                    done.resume()
+                                    return
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw ExportError.writerSetupFailed("mux failed: \(String(describing: writer.error))")
         }
     }
 
