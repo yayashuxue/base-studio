@@ -137,6 +137,9 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// current segment once the take passes these times (seconds since the
     /// first frame). Time-based so long takes fail at predictable moments.
     private var injectFailAtSeconds: [Double] = []
+    /// Test-only (`BS_INJECT_SCREEN_SILENCE_AFTER_SECONDS=10`): ignore every
+    /// screen frame after this point, as a locked/sleeping display does.
+    private var injectSilenceAfter: Double?
     public private(set) var screenRecoveryCount: Int = 0
     /// Software H.264 instead of VideoToolbox hardware (experiment: BS_FORCE_SW_ENCODER=1).
     private var useSoftwareEncoder = ProcessInfo.processInfo.environment["BS_FORCE_SW_ENCODER"] == "1"
@@ -354,6 +357,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.lastFailureAt = 0
         self.injectFailAt = Self.frameList("BS_INJECT_SCREEN_FAIL_AT_FRAMES")
         self.injectCancelAt = Self.frameList("BS_INJECT_SCREEN_CANCEL_AT_FRAMES")
+        self.injectSilenceAfter = ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_SILENCE_AFTER_SECONDS"].flatMap(Double.init)
         self.injectFailAtSeconds = (ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_FAIL_AT_SECONDS"] ?? "")
             .split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.sorted()
         self.writer = writer
@@ -709,6 +713,14 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // AVAssetWriter behind.
         defer { resetHandles() }
 
+        // The take ends when the user stops — not at the last frame SCK sent.
+        // SCK sends nothing for a static or locked screen (a 330 s take whose
+        // screen locked after 10 s had its last frame at 10 s), so the
+        // timeline and the closing frame are anchored to now, on the same host
+        // clock SCK stamps frames with.
+        let stopHostTime = CMClockGetTime(CMClockGetHostTimeClock())
+        if let last = lastPTS, CMTimeCompare(stopHostTime, last) > 0 { lastPTS = stopHostTime }
+
         var stopCaptureError: Error?
         do {
             try await adapter.stopCapture()
@@ -802,6 +814,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         guard sampleBuffer.isValid else { return }
 
         if type == .screen {
+            if let quiet = injectSilenceAfter, let origin = firstPTS,
+               CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), origin).seconds > quiet {
+                return
+            }
             screenFramesReceived += 1
             // Skip only frames we know are unusable: stopped, suspended.
             if let attachments = CMSampleBufferGetSampleAttachmentsArray(
