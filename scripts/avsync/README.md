@@ -8,8 +8,9 @@ tick − flash in ms.
     python3 avsync.py <file> x,y,w,h      # flash: crop luma (ffmpeg); tick: audio peaks (ffmpeg)
     swiftc -O -o /tmp/readticks readticks.swift && /tmp/readticks <file>   # tick times via AVFoundation
 
-Crops used on the MacBook (1512x982 capture): screen.mov `10,10,120,120`;
-export (1920x1080 canvas, polished layout) `290,110,80,80`.
+Crops used on the MacBook (1512x982 capture): screen.mov `10,10,140,80`;
+export (1920x1080 canvas, polished layout) `270,90,120,60`. Measure only the
+upper part of the square: its lower part carries the "同步测试 Sync test" label.
 
 ffmpeg ignores the AAC priming trim AVAssetWriter writes into the exported
 .mp4 and reads its audio 44 ms late; use readticks (Apple decoding) for export

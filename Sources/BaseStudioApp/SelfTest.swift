@@ -55,6 +55,16 @@ enum SelfTest {
             w.level = .screenSaver
             w.backgroundColor = .black
             w.ignoresMouseEvents = true
+            // Say what this is, in place: people closed the app thinking a
+            // bare black square was a bug. The flash region (top 100 pt) stays
+            // plain so the luma measurement is unaffected.
+            let label = NSTextField(labelWithString: "Base Studio\n同步测试 Sync test\n约 20 分钟 · 请勿关闭")
+            label.textColor = .white
+            label.font = .systemFont(ofSize: 12, weight: .semibold)
+            label.alignment = .center
+            label.maximumNumberOfLines = 3
+            label.frame = NSRect(x: 4, y: 4, width: 152, height: 52)
+            w.contentView?.addSubview(label)
             w.orderFrontRegardless()
             window = w
             timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
