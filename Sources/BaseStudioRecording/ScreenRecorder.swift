@@ -133,6 +133,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// those counts so it turns `.cancelled` and its input stops being ready —
     /// the "dead encoder, input never ready" path, which must still roll over.
     private var injectCancelAt: Set<Int> = []
+    /// Test-only (`BS_INJECT_SCREEN_FAIL_AT_SECONDS=90,200`): abandon the
+    /// current segment once the take passes these times (seconds since the
+    /// first frame). Time-based so long takes fail at predictable moments.
+    private var injectFailAtSeconds: [Double] = []
     public private(set) var screenRecoveryCount: Int = 0
     /// Software H.264 instead of VideoToolbox hardware (experiment: BS_FORCE_SW_ENCODER=1).
     private var useSoftwareEncoder = ProcessInfo.processInfo.environment["BS_FORCE_SW_ENCODER"] == "1"
@@ -350,6 +354,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.lastFailureAt = 0
         self.injectFailAt = Self.frameList("BS_INJECT_SCREEN_FAIL_AT_FRAMES")
         self.injectCancelAt = Self.frameList("BS_INJECT_SCREEN_CANCEL_AT_FRAMES")
+        self.injectFailAtSeconds = (ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_FAIL_AT_SECONDS"] ?? "")
+            .split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.sorted()
         self.writer = writer
         self.videoInput = videoInput
         self.audioInput = audioInput
@@ -563,8 +569,13 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             guard let v = try? await asset.loadTracks(withMediaType: .video).first else { continue }
             let range = (try? await v.load(.timeRange)) ?? .zero
             guard range.duration.seconds > 0 else { continue }
-            let at = CMTimeMaximum(.zero, CMTimeSubtract(seg.start, origin))
-            try vTrack.insertTimeRange(range, of: v, at: at)
+            // File time 0 of a segment is its session start (= seg.start on
+            // the host clock). Media at file time t belongs at offset + t, so
+            // each track is placed by its OWN start — audio usually begins a
+            // little after the first frame; anchoring it at the segment start
+            // would pull it early and break A/V sync.
+            let offset = CMTimeMaximum(.zero, CMTimeSubtract(seg.start, origin))
+            try vTrack.insertTimeRange(range, of: v, at: CMTimeAdd(offset, range.start))
             if transform == nil { transform = try? await v.load(.preferredTransform) }
             if let a = try? await asset.loadTracks(withMediaType: .audio).first {
                 let ar = (try? await a.load(.timeRange)) ?? .zero
@@ -572,7 +583,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                     if aTrack == nil {
                         aTrack = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
                     }
-                    try? aTrack?.insertTimeRange(ar, of: a, at: at)
+                    try? aTrack?.insertTimeRange(ar, of: a, at: CMTimeAdd(offset, ar.start))
                 }
             }
             usable += 1
@@ -878,6 +889,13 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             screenFramesAppended += 1
             if screenFramesAppended % 60 == 1 {
                 BSLog.info("appended \(screenFramesAppended) frames")
+            }
+            if let next = injectFailAtSeconds.first, let origin = firstPTS,
+               CMTimeSubtract(pts, origin).seconds >= next {
+                injectFailAtSeconds.removeFirst()
+                BSLog.warn("BS_INJECT_SCREEN_FAIL_AT_SECONDS: abandoning segment at \(CMTimeSubtract(pts, origin).seconds)s")
+                rollOverSegment(reason: "injected at \(next)s")
+                return
             }
             if injectFailAt.contains(screenFramesAppended) {
                 BSLog.warn("BS_INJECT_SCREEN_FAIL_AT_FRAMES: abandoning segment at frame \(screenFramesAppended)")

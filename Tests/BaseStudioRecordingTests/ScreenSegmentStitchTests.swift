@@ -41,6 +41,48 @@ final class ScreenSegmentStitchTests: XCTestCase {
         return url
     }
 
+    /// Segment whose audio starts `audioDelay` s after its first frame, like a
+    /// real take (audio is only appended once the video session is open).
+    private func makeSegmentWithLateAudio(_ name: String, seconds: Int, audioDelay: Double) throws -> URL {
+        let url = dir.appendingPathComponent(name)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: Self.ffmpeg!)
+        p.arguments = ["-v", "error", "-y",
+                       "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30",
+                       "-itsoffset", "\(audioDelay)",
+                       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                       "-t", "\(seconds)", "-map", "0:v", "-map", "1:a",
+                       "-c:v", "libx264", "-g", "60", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                       "-shortest", url.path]
+        try p.run(); p.waitUntilExit()
+        XCTAssertEqual(p.terminationStatus, 0, "ffmpeg failed")
+        return url
+    }
+
+    private func trackStart(_ url: URL, _ type: AVMediaType) async throws -> Double {
+        let asset = AVURLAsset(url: url)
+        let t = try await asset.loadTracks(withMediaType: type)
+        XCTAssertFalse(t.isEmpty, "no \(type.rawValue) track")
+        // Where real media begins on the movie timeline: the first non-empty
+        // edit (a late track starts with an empty edit).
+        let segs = try await t[0].load(.segments)
+        guard let first = segs.first(where: { !$0.isEmpty }) else { return -1 }
+        return first.timeMapping.target.start.seconds
+    }
+
+    func testStitchKeepsLateAudioAtItsOwnTimeInEverySegment() async throws {
+        // Segment 2 starts 7 s into the take; its audio starts 1 s after its
+        // first frame. In the output that audio must start at 8 s, not 7 s.
+        let s1 = try makeSegment("screen.mov", seconds: 6)
+        let s2 = try makeSegmentWithLateAudio("screen.part1.mov", seconds: 4, audioDelay: 1.0)
+        let srcAudioStart = try await trackStart(s2, .audio)
+        XCTAssertEqual(srcAudioStart, 1.0, accuracy: 0.1, "fixture: audio should start ~1 s in")
+        let out = dir.appendingPathComponent("screen.mov")
+        try await ScreenRecorder.stitch(segments: [(s1, t(100)), (s2, t(107))], origin: t(100), into: out)
+        let a = try await trackStart(out, .audio)
+        XCTAssertEqual(a, 8.0, accuracy: 0.1, "late audio was moved to the segment start (A/V drift)")
+    }
+
     private func duration(_ url: URL) async throws -> Double {
         let asset = AVURLAsset(url: url)
         let v = try await asset.loadTracks(withMediaType: .video)

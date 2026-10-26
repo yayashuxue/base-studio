@@ -31,6 +31,49 @@ enum SelfTest {
 
     /// `--selftest-seconds N` (default 4). Long takes + the test-only
     /// BS_INJECT_SCREEN_FAIL_AT_FRAMES env exercise mid-recording encoder recovery.
+    /// `--selftest-rounds N` (default 2): consecutive record → stop → reopen.
+    private static var rounds: Int {
+        if let i = CommandLine.arguments.firstIndex(of: "--selftest-rounds"),
+           i + 1 < CommandLine.arguments.count, let v = Int(CommandLine.arguments[i + 1]) {
+            return max(1, v)
+        }
+        return 2
+    }
+
+    /// `--selftest-sync-markers`: every 3 s flash a small white square in the
+    /// top-left corner and play a short tick through a *separate* process
+    /// (our own audio is excluded from capture). Each export then carries
+    /// matching picture/sound events whose offset is the A/V sync error.
+    @MainActor
+    final class SyncMarkers {
+        private var window: NSWindow?
+        private var timer: Timer?
+        func start() {
+            let screen = NSScreen.main?.frame ?? .zero
+            let w = NSWindow(contentRect: NSRect(x: screen.minX, y: screen.maxY - 160, width: 160, height: 160),
+                             styleMask: .borderless, backing: .buffered, defer: false)
+            w.level = .screenSaver
+            w.backgroundColor = .black
+            w.ignoresMouseEvents = true
+            w.orderFrontRegardless()
+            window = w
+            timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.flash() }
+            }
+        }
+        private func flash() {
+            window?.backgroundColor = .white
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+            p.arguments = ["-v", "0.15", "/System/Library/Sounds/Tink.aiff"]
+            try? p.run()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.window?.backgroundColor = .black
+            }
+        }
+        func stop() { timer?.invalidate(); window?.orderOut(nil); window = nil }
+    }
+
     private static var recordSeconds: Double {
         if let i = CommandLine.arguments.firstIndex(of: "--selftest-seconds"),
            i + 1 < CommandLine.arguments.count, let v = Double(CommandLine.arguments[i + 1]) {
@@ -82,7 +125,11 @@ enum SelfTest {
         // concurrent webcam H.264 session (to tell a concurrent-encoder startup
         // race apart from a resolution / machine-state issue).
         let withWebcam = !CommandLine.arguments.contains("--selftest-no-webcam")
-        for i in 1...2 {
+        let markers = CommandLine.arguments.contains("--selftest-sync-markers") ? SyncMarkers() : nil
+        markers?.start()
+        defer { markers?.stop() }
+        let exportEach = CommandLine.arguments.contains("--selftest-export-each")
+        for i in 1...rounds {
             var r = RunResult(index: i)
             let session = RecordingSession(options: .init(
                 includeWebcam: withWebcam, includeSystemAudio: true, includeMic: withWebcam
@@ -129,6 +176,20 @@ enum SelfTest {
             r.pass = !r.failureJson && r.metadata && r.screenTrack
                 && r.screenDurationSec > max(1.0, recordSeconds - 1.5) && r.openOk
                 && (!withWebcam || (r.webcamTrack && r.micTrack))
+            if exportEach {
+                do {
+                    let editor = try EditorState.load(bundleURL: bundle.url)
+                    let out = bundle.url.appendingPathComponent("selftest-export.mp4")
+                    let url = try await ExportPipeline().run(.init(
+                        project: editor.project, bundleURL: bundle.url,
+                        outputURL: out, fps: 60, bitrate: 8_000_000, audioMode: .both
+                    ))
+                    r.exportSec = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
+                } catch {
+                    r.exportError = "\(error)"
+                }
+                r.pass = r.pass && r.exportSec > max(1.0, recordSeconds - 1.5)
+            }
             report.runs.append(r)
         }
 
@@ -251,6 +312,8 @@ enum SelfTest {
         var screenDims = ""
         var screenDurationSec: Double = 0
         var recordSeconds: Double = 0
+        var exportSec: Double = 0
+        var exportError: String?
         var webcamTrack = false
         var micTrack = false
         var openOk = false
