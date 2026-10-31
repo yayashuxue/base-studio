@@ -211,7 +211,11 @@ public final class ExportPipeline {
                 currentTimelinePTS = timelinePTS
 
                 try await Self.waitUntilReady(videoInput, writer: writer, appendedFrames: frameCount)
-                try renderAndAppend(
+                // Drain per frame: CIImage graphs, the rendered pixel buffer and
+                // the decoded source frame are autoreleased; without a pool the
+                // whole export kept every frame alive (~8 MB each at 1080p —
+                // a 6,400-frame take reached ~40 GB and froze the Mac).
+                try autoreleasepool { try renderAndAppend(
                     project: input.project, primaryFrame: frame.image, timelinePTS: timelinePTS,
                     sidecarOffset: sidecarOffset, primary: primary,
                     sidecars: sidecars, ciContext: ciContext,
@@ -220,7 +224,7 @@ public final class ExportPipeline {
                     adaptor: adaptor,
                     backgroundImage: backgroundImage,
                     frameProvider: frameProvider
-                )
+                ) }
                 frameCount += 1
                 if frameCount % 5 == 0, timelineDurationSec > 0 {
                     onProgress?(min(1.0, timelinePTS.seconds / timelineDurationSec))
@@ -253,7 +257,11 @@ public final class ExportPipeline {
                 let primaryFrame = CIImage(cgImage: cg)
 
                 try await Self.waitUntilReady(videoInput, writer: writer, appendedFrames: frameCount)
-                try renderAndAppend(
+                // Drain per frame: CIImage graphs, the rendered pixel buffer and
+                // the decoded source frame are autoreleased; without a pool the
+                // whole export kept every frame alive (~8 MB each at 1080p —
+                // a 6,400-frame take reached ~40 GB and froze the Mac).
+                try autoreleasepool { try renderAndAppend(
                     project: input.project, primaryFrame: primaryFrame, timelinePTS: timelinePTS,
                     sidecarOffset: sidecarOffset, primary: primary,
                     sidecars: sidecars, ciContext: ciContext,
@@ -262,7 +270,7 @@ public final class ExportPipeline {
                     adaptor: adaptor,
                     backgroundImage: backgroundImage,
                     frameProvider: frameProvider
-                )
+                ) }
                 frameCount += 1
                 if frameCount % 10 == 0, timelineDurationSec > 0 {
                     onProgress?(min(1.0, timelineSec / timelineDurationSec))
@@ -431,33 +439,33 @@ public final class ExportPipeline {
             throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))")
         }
         writer.startSession(atSourceTime: .zero)
-        await withTaskGroup(of: Void.self) { group in
-            for (i, (out, input, _, limit)) in pairs.enumerated() {
-                group.addTask {
-                    await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-                        let q = DispatchQueue(label: "BaseStudio.mux.\(i)")
-                        var finished = false
-                        input.requestMediaDataWhenReady(on: q) {
-                            while input.isReadyForMoreMediaData && !finished {
-                                guard let sb = out.copyNextSampleBuffer(),
-                                      limit.map({ CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sb), $0) < 0 }) ?? true
-                                else {
-                                    finished = true
-                                    input.markAsFinished()
-                                    done.resume()
-                                    return
-                                }
-                                if !input.append(sb) {
-                                    finished = true
-                                    input.markAsFinished()
-                                    done.resume()
-                                    return
-                                }
-                            }
-                        }
-                    }
+        // One loop, two streams: always append the earlier of the two pending
+        // samples, waiting (bounded) for that input. The writer interleaves
+        // tracks, so the earliest-first order is exactly what it asks for; the
+        // earlier callback-per-input version deadlocked on a 10 s 1080p export.
+        var heads: [CMSampleBuffer?] = pairs.map { $0.0.copyNextSampleBuffer() }
+        var done = pairs.map { _ in false }
+        func pts(_ sb: CMSampleBuffer) -> CMTime { CMSampleBufferGetPresentationTimeStamp(sb) }
+        while true {
+            var pick: Int?
+            for k in pairs.indices where !done[k] {
+                guard let sb = heads[k], pairs[k].3.map({ CMTimeCompare(pts(sb), $0) < 0 }) ?? true else {
+                    pairs[k].1.markAsFinished(); done[k] = true; continue
                 }
+                if pick == nil || CMTimeCompare(pts(sb), pts(heads[pick!]!)) < 0 { pick = k }
             }
+            guard let k = pick, let sb = heads[k] else { break }
+            let input = pairs[k].1
+            let started = Date()
+            while !input.isReadyForMoreMediaData {
+                if writer.status == .failed { throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))") }
+                if Date().timeIntervalSince(started) > 20 { throw ExportError.writerSetupFailed("mux: input stalled for 20 s") }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            if !input.append(sb) {
+                throw ExportError.writerSetupFailed("mux append failed: \(String(describing: writer.error))")
+            }
+            heads[k] = pairs[k].0.copyNextSampleBuffer()
         }
         await writer.finishWriting()
         guard writer.status == .completed else {
