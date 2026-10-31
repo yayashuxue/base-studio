@@ -166,8 +166,16 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// timer that does not depend on frames arriving, so a stalled capture
     /// source is visible in the log (in the 10/31 take both picture and
     /// sound vanished for the same 52 s).
-    private var lastScreenCallback: CFAbsoluteTime = 0
-    private var lastAudioCallback: CFAbsoluteTime = 0
+    /// Written on the SCK screen/audio queues, read on the timer queue →
+    /// its own lock; the timer reads one snapshot, never the live counters.
+    private struct CaptureActivity {
+        var lastScreen: CFAbsoluteTime = 0
+        var lastAudio: CFAbsoluteTime = 0
+        var screenCallbacks = 0
+        var audioCallbacks = 0
+    }
+    private let activityLock = NSLock()
+    private var _activity = CaptureActivity()
     private var watchdog: DispatchSourceTimer?
     /// Last frame actually encoded + its time. SCK sends no picture while the
     /// screen is static, so without a closing frame the video track ended at
@@ -677,14 +685,19 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private func startWatchdog() {
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         let started = CFAbsoluteTimeGetCurrent()
-        lastScreenCallback = started; lastAudioCallback = started
+        activityLock.lock()
+        _activity = CaptureActivity(lastScreen: started, lastAudio: started)
+        activityLock.unlock()
         t.schedule(deadline: .now() + 5, repeating: 5)
         t.setEventHandler { [weak self] in
             guard let self else { return }
+            self.activityLock.lock()
+            let a = self._activity
+            self.activityLock.unlock()
             let now = CFAbsoluteTimeGetCurrent()
-            let sinceScreen = now - self.lastScreenCallback, sinceAudio = now - self.lastAudioCallback
-            let msg = String(format: "capture watchdog: last screen callback %.1f s ago, last audio buffer %.1f s ago (received screen=%d audio=%d)",
-                             sinceScreen, sinceAudio, self.screenFramesReceived, self.audioBuffersReceived)
+            let sinceScreen = now - a.lastScreen, sinceAudio = now - a.lastAudio
+            let msg = String(format: "capture watchdog: last screen callback %.1f s ago, last audio buffer %.1f s ago (callbacks screen=%d audio=%d)",
+                             sinceScreen, sinceAudio, a.screenCallbacks, a.audioCallbacks)
             if sinceScreen > 5 || (self.captureSystemAudio && sinceAudio > 5) { BSLog.warn(msg) } else { BSLog.info(msg) }
         }
         t.resume()
@@ -868,7 +881,14 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     ) {
         guard sampleBuffer.isValid else { return }
 
-        if type == .screen { lastScreenCallback = CFAbsoluteTimeGetCurrent() } else { lastAudioCallback = CFAbsoluteTimeGetCurrent() }
+        let now = CFAbsoluteTimeGetCurrent()
+        activityLock.lock()
+        if type == .screen {
+            _activity.lastScreen = now; _activity.screenCallbacks += 1
+        } else {
+            _activity.lastAudio = now; _activity.audioCallbacks += 1
+        }
+        activityLock.unlock()
         if type == .screen {
             if let quiet = injectSilenceAfter, let origin = firstPTS,
                CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), origin).seconds > quiet {
