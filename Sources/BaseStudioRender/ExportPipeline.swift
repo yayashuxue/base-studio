@@ -439,33 +439,36 @@ public final class ExportPipeline {
             throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))")
         }
         writer.startSession(atSourceTime: .zero)
-        // One loop, two streams: always append the earlier of the two pending
-        // samples, waiting (bounded) for that input. The writer interleaves
-        // tracks, so the earliest-first order is exactly what it asks for; the
-        // earlier callback-per-input version deadlocked on a 10 s 1080p export.
+        // One loop, two streams: append to whichever input the writer will
+        // take. Feeding strictly earliest-first stalled on a long take whose
+        // video had a 52 s gap: the writer held audio back waiting for video
+        // that came only after the gap. Fail only when neither input has
+        // accepted anything for 20 s.
         var heads: [CMSampleBuffer?] = pairs.map { $0.0.copyNextSampleBuffer() }
         var done = pairs.map { _ in false }
-        func pts(_ sb: CMSampleBuffer) -> CMTime { CMSampleBufferGetPresentationTimeStamp(sb) }
-        while true {
-            var pick: Int?
+        var lastProgress = Date()
+        while done.contains(false) {
+            var progressed = false
             for k in pairs.indices where !done[k] {
-                guard let sb = heads[k], pairs[k].3.map({ CMTimeCompare(pts(sb), $0) < 0 }) ?? true else {
-                    pairs[k].1.markAsFinished(); done[k] = true; continue
+                let (out, input, _, limit) = pairs[k]
+                while input.isReadyForMoreMediaData {
+                    guard let sb = heads[k],
+                          limit.map({ CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sb), $0) < 0 }) ?? true
+                    else { input.markAsFinished(); done[k] = true; progressed = true; break }
+                    if !input.append(sb) {
+                        throw ExportError.writerSetupFailed("mux append failed: \(String(describing: writer.error))")
+                    }
+                    heads[k] = out.copyNextSampleBuffer()
+                    progressed = true
                 }
-                if pick == nil || CMTimeCompare(pts(sb), pts(heads[pick!]!)) < 0 { pick = k }
             }
-            guard let k = pick, let sb = heads[k] else { break }
-            let input = pairs[k].1
-            let started = Date()
-            while !input.isReadyForMoreMediaData {
-                if writer.status == .failed { throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))") }
-                if Date().timeIntervalSince(started) > 20 { throw ExportError.writerSetupFailed("mux: input stalled for 20 s") }
+            if writer.status == .failed { throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))") }
+            if progressed {
+                lastProgress = Date()
+            } else {
+                if Date().timeIntervalSince(lastProgress) > 20 { throw ExportError.writerSetupFailed("mux: no input accepted data for 20 s") }
                 try await Task.sleep(nanoseconds: 1_000_000)
             }
-            if !input.append(sb) {
-                throw ExportError.writerSetupFailed("mux append failed: \(String(describing: writer.error))")
-            }
-            heads[k] = pairs[k].0.copyNextSampleBuffer()
         }
         await writer.finishWriting()
         guard writer.status == .completed else {

@@ -124,7 +124,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var recoveries: Int = 0
     private var lastFailureAt: CFAbsoluteTime = 0
     static let maxRecoveries = 20
-    static let fragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
+    public static let fragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
     /// Test-only fault injection (`BS_INJECT_SCREEN_FAIL_AT_FRAMES=300,900`):
     /// abandon the current segment at those appended-frame counts as if the
     /// encoder had been invalidated. Never set in normal runs.
@@ -156,6 +156,11 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var pendingAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var copyDropsNoPool = 0
     private var copyIdleFrames = 0
+    /// Diagnostics for unexplained segment loss (a 330 s take lost 52.8 s of
+    /// segment 2 that no probe reproduces): every 5 s log the current
+    /// segment's on-disk size and writer status, so the next occurrence shows
+    /// when data stopped reaching the disk.
+    private var lastSizeLog: CFAbsoluteTime = 0
     /// Last frame actually encoded + its time. SCK sends no picture while the
     /// screen is static, so without a closing frame the video track ended at
     /// the last *change* (5.2 s of an 8 s take) and export cut the tail —
@@ -436,6 +441,29 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         return pool
     }
 
+    /// The screen encoder settings — shared with the self-test fragment probe
+    /// so it exercises exactly what the recorder writes.
+    public static func screenVideoSettings(width: Int, height: Int, fps: Int, timeCappedKeyframes: Bool = true) -> [String: Any] {
+        var props: [String: Any] = [
+            AVVideoAverageBitRateKey: max(8_000_000, width * height * fps / 12),
+            AVVideoMaxKeyFrameIntervalKey: fps * 2,
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+        ]
+        if timeCappedKeyframes {
+            // Also cap the keyframe gap in *time*. Fragments can only be cut at
+            // keyframes; with a frame-count limit alone a static screen (a frame
+            // every few seconds) went minutes without a keyframe, so no fragment
+            // was written and a failed segment lost 52 s instead of ~2 s.
+            props[AVVideoMaxKeyFrameIntervalDurationKey] = 1.0
+        }
+        return [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: props,
+        ]
+    }
+
     static func frameList(_ env: String) -> Set<Int> {
         Set((ProcessInfo.processInfo.environment[env] ?? "")
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
@@ -470,16 +498,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // H.264 for the recorded source. Keep the broadly compatible codec, but
         // pair it with NV12 frames so VideoToolbox does not have to encode
         // SCK's BGRA buffers directly.
-        var videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: widthPx,
-            AVVideoHeightKey: heightPx,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: max(8_000_000, widthPx * heightPx * fps / 12),
-                AVVideoMaxKeyFrameIntervalKey: fps * 2,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-            ],
-        ]
+        var videoSettings = Self.screenVideoSettings(width: widthPx, height: heightPx, fps: fps)
         if useSoftwareEncoder {
             // Hardware H.264 sessions can be dead on arrival (-12785/-16122 on
             // frame 1) when the media stack is degraded; Apple's software
@@ -909,6 +928,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 return
             }
             screenFramesAppended += 1
+            if CFAbsoluteTimeGetCurrent() - lastSizeLog >= 5 {
+                lastSizeLog = CFAbsoluteTimeGetCurrent()
+                writerLock.lock(); let segURL = segments.last?.url; writerLock.unlock()
+                let size = segURL.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int } ?? -1
+                BSLog.info("segment \(segments.count) on disk: \(size) bytes, writer.status=\(writer.status.rawValue), appended=\(screenFramesAppended)")
+            }
             if screenFramesAppended % 60 == 1 {
                 BSLog.info("appended \(screenFramesAppended) frames")
             }

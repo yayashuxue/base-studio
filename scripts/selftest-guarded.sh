@@ -29,7 +29,7 @@ monitor() {  # monitor <pid> <cap_mb> <csv>; sets STATUS
       STATUS="killed: footprint ${FP} MB > ${CAP_MB} MB cap"
       kill -9 "$PID"; break
     fi
-    [ "$LOCK" = "Yes" ] && [ -z "${NO_LOCK_STOP:-}" ] && { STATUS="stopped: screen locked"; kill "$PID"; sleep 3; kill -9 "$PID" 2>/dev/null; break; }
+    [ "$LOCK" = "Yes" ] && [ -z "${NO_LOCK_STOP:-}${ALLOW_LOCKED:-}" ] && { STATUS="stopped: screen locked"; kill "$PID"; sleep 3; kill -9 "$PID" 2>/dev/null; break; }
     sleep 1
   done
 }
@@ -44,7 +44,8 @@ echo "utc,phys_footprint_mb,rss_mb,locked" > "$MEM"
 if pgrep -f "Base Studio.app/Contents/MacOS/BaseStudio" >/dev/null; then
   echo "Base Studio is already running — quit it first; not starting the test." | tee "$OUT/summary.txt"; exit 3
 fi
-if [ "$(ioreg -n Root -d1 | grep -o 'IOConsoleLocked" = [A-Za-z]*' | awk '{print $3}')" != "No" ]; then
+# ALLOW_LOCKED=1 only for probes that do not capture the screen.
+if [ -z "${ALLOW_LOCKED:-}" ] && [ "$(ioreg -n Root -d1 | grep -o 'IOConsoleLocked" = [A-Za-z]*' | awk '{print $3}')" != "No" ]; then
   echo "Screen is locked — not starting the test." | tee "$OUT/summary.txt"; exit 4
 fi
 caffeinate -d -u -t 2400 >/dev/null 2>&1 & CAF=$!

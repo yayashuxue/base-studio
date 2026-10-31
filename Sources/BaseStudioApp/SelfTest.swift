@@ -111,6 +111,26 @@ enum SelfTest {
 
     @MainActor
     private static func run(into report: inout Report) async throws {
+        if CommandLine.arguments.contains("--selftest-fragment-probe-realtime") {
+            let r = await realtimeFragmentProbe(seconds: 120)
+            report.fragmentProbe = ["realtime120": r]
+            report.pass = r.hasPrefix("ok")
+            return
+        }
+        if CommandLine.arguments.contains("--selftest-fragment-probe") {
+            var r: [String: String] = [:]
+            for capped in [true, false] {
+                for audio in [false, true] {
+                    for release in [false, true] {
+                        let key = "\(capped ? "timeCapped" : "frameCountOnly")\(audio ? "+audio" : "")\(release ? "+released" : "")"
+                        r[key] = await fragmentProbe(timeCapped: capped, withAudio: audio, releaseWriter: release)
+                    }
+                }
+            }
+            report.fragmentProbe = r
+            report.pass = r.filter { $0.key.hasPrefix("timeCapped") }.allSatisfy { $0.value.hasPrefix("ok") }
+            return
+        }
         if CommandLine.arguments.contains("--selftest-synthetic-writer") {
             report.syntheticWriter = await syntheticWriterProbe()
             report.pass = report.syntheticWriter?.hasPrefix("ok") == true
@@ -255,6 +275,159 @@ enum SelfTest {
         }
     }
 
+    /// A static screen sends a frame only every few seconds. Write such a
+    /// segment with the recorder's settings (frame every 2 s of media time),
+    /// abandon the writer at 50 s the way a dead encoder does (no finish), and
+    /// measure how much is still readable. Goal: lose at most ~3 s.
+    static func fragmentProbe(timeCapped: Bool, withAudio: Bool = false, releaseWriter: Bool = false) async -> String {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bs-frag-\(UUID().uuidString).mov")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let w = 1512, h = 982
+        let readable: Double = await {
+            var holder: AVAssetWriter? = try? AVAssetWriter(outputURL: url, fileType: .mov)
+            if holder == nil { return -1 }
+            unowned let writer = holder!
+            writer.movieFragmentInterval = ScreenRecorder.fragmentInterval
+            let input = AVAssetWriterInput(mediaType: .video,
+                outputSettings: ScreenRecorder.screenVideoSettings(width: w, height: h, fps: 60, timeCappedKeyframes: timeCapped))
+            input.expectsMediaDataInRealTime = true
+            let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+            ])
+            writer.add(input)
+            var audioIn: AVAssetWriterInput?
+            if withAudio {
+                let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC, AVNumberOfChannelsKey: 2,
+                    AVSampleRateKey: 48_000, AVEncoderBitRateKey: 192_000])
+                ai.expectsMediaDataInRealTime = true
+                writer.add(ai); audioIn = ai
+            }
+            guard writer.startWriting() else { return -2 }
+            writer.startSession(atSourceTime: .zero)
+            for i in 0...25 {   // frames at 0, 2, …, 50 s
+                while !input.isReadyForMoreMediaData { try? await Task.sleep(nanoseconds: 2_000_000) }
+                guard let pool = adaptor.pixelBufferPool else { return -3 }
+                var pb: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
+                guard let pb else { return -4 }
+                CVPixelBufferLockBaseAddress(pb, [])
+                if let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0) { memset(y, Int32(30 + i * 7), CVPixelBufferGetBytesPerRowOfPlane(pb, 0) * h) }
+                if let uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1) { memset(uv, 128, CVPixelBufferGetBytesPerRowOfPlane(pb, 1) * h / 2) }
+                CVPixelBufferUnlockBaseAddress(pb, [])
+                guard adaptor.append(pb, withPresentationTime: CMTime(seconds: Double(i) * 2, preferredTimescale: 600)) else { return -5 }
+                if let ai = audioIn, i < 25 {   // 2 s of silent audio per video frame
+                    for c in 0..<94 {
+                        let start = Double(i) * 2 + Double(c) * 1024 / 48_000
+                        if let sb = silentAudio(at: start), ai.isReadyForMoreMediaData { ai.append(sb) }
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            // Abandoned here: no markAsFinished / finishWriting, like a writer whose encoder died.
+            if releaseWriter { holder = nil }   // the recorder drops its only reference on rollover
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            let asset = AVURLAsset(url: url)
+            guard let t = try? await asset.loadTracks(withMediaType: .video).first else { return 0 }
+            let segs = (try? await t.load(.segments)) ?? []
+            return segs.filter { !$0.isEmpty }.map { $0.timeMapping.target.end.seconds }.max() ?? 0
+        }()
+        if readable < 0 { return "fail: setup \(readable)" }
+        let lost = 50 - readable
+        return String(format: "%@: readable to %.1f s of 50 s (lost %.1f s)", lost <= 3 ? "ok" : "fail", readable, lost)
+    }
+
+    /// Same writer, but paced like a real take on the host clock: audio
+    /// buffers every ~21 ms, a picture only every 1–3 s (static screen). The
+    /// writer is dropped at `seconds` without finishing.
+    static func realtimeFragmentProbe(seconds: Double) async -> String {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bs-fragrt-\(UUID().uuidString).mov")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let w = 1512, h = 982
+        var holder: AVAssetWriter? = try? AVAssetWriter(outputURL: url, fileType: .mov)
+        guard holder != nil else { return "fail: writer init" }
+        unowned let writer = holder!
+        writer.movieFragmentInterval = ScreenRecorder.fragmentInterval
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: ScreenRecorder.screenVideoSettings(width: w, height: h, fps: 60))
+        vIn.expectsMediaDataInRealTime = true
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vIn, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]])
+        writer.add(vIn)
+        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC, AVNumberOfChannelsKey: 2, AVSampleRateKey: 48_000, AVEncoderBitRateKey: 192_000])
+        aIn.expectsMediaDataInRealTime = true
+        writer.add(aIn)
+        guard writer.startWriting() else { return "fail: startWriting" }
+        let clock = CMClockGetHostTimeClock()
+        let t0 = CMClockGetTime(clock)
+        writer.startSession(atSourceTime: t0)
+        var audioSamples: Int64 = 0
+        var nextFrameAt = 0.0
+        var frames = 0
+        var i = 0
+        while true {
+            let now = CMClockGetTime(clock)
+            let elapsed = CMTimeSubtract(now, t0).seconds
+            if elapsed >= seconds { break }
+            // audio up to now
+            while Double(audioSamples) / 48_000 <= elapsed {
+                if let sb = silentAudio(at: t0.seconds + Double(audioSamples) / 48_000), aIn.isReadyForMoreMediaData { aIn.append(sb) }
+                audioSamples += 1024
+            }
+            if elapsed >= nextFrameAt, vIn.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool {
+                var pb: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
+                if let pb {
+                    CVPixelBufferLockBaseAddress(pb, [])
+                    if let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0) { memset(y, Int32(30 + (i * 37) % 200), CVPixelBufferGetBytesPerRowOfPlane(pb, 0) * h) }
+                    if let uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1) { memset(uv, 128, CVPixelBufferGetBytesPerRowOfPlane(pb, 1) * h / 2) }
+                    CVPixelBufferUnlockBaseAddress(pb, [])
+                    if adaptor.append(pb, withPresentationTime: now) { frames += 1 }
+                }
+                i += 1
+                nextFrameAt = elapsed + Double.random(in: 1...3)
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let status = writer.status.rawValue
+        holder = nil   // abandoned like a dead encoder: no finishWriting
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        let asset = AVURLAsset(url: url)
+        func end(_ type: AVMediaType) async -> Double {
+            guard let t = try? await asset.loadTracks(withMediaType: type).first else { return 0 }
+            let segs = (try? await t.load(.segments)) ?? []
+            return segs.filter { !$0.isEmpty }.map { $0.timeMapping.target.end.seconds }.max() ?? 0
+        }
+        let v = await end(.video), a = await end(.audio)
+        let lost = seconds - max(v, a)
+        return String(format: "%@: %.0f s take, %d frames, writer status %d; readable video to %.1f s, audio to %.1f s (lost %.1f s)",
+                      lost <= 3 ? "ok" : "fail", seconds, frames, status, v, a, lost)
+    }
+
+    static func silentAudio(at seconds: Double) -> CMSampleBuffer? {
+        var asbd = AudioStreamBasicDescription(mSampleRate: 48_000, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kLinearPCMFormatFlagIsFloat | kLinearPCMFormatFlagIsPacked,
+            mBytesPerPacket: 8, mFramesPerPacket: 1, mBytesPerFrame: 8, mChannelsPerFrame: 2, mBitsPerChannel: 32, mReserved: 0)
+        var fmt: CMAudioFormatDescription?
+        CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0,
+                                       magicCookie: nil, extensions: nil, formatDescriptionOut: &fmt)
+        let n = 1024, bytes = n * 8
+        var bb: CMBlockBuffer?
+        CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: bytes, blockAllocator: nil,
+                                           customBlockSource: nil, offsetToData: 0, dataLength: bytes, flags: 0, blockBufferOut: &bb)
+        guard let bb, let fmt else { return nil }
+        CMBlockBufferFillDataBytes(with: 0, blockBuffer: bb, offsetIntoDestination: 0, dataLength: bytes)
+        var sb: CMSampleBuffer?
+        CMAudioSampleBufferCreateReadyWithPacketDescriptions(allocator: nil, dataBuffer: bb, formatDescription: fmt,
+            sampleCount: n, presentationTimeStamp: CMTime(seconds: seconds, preferredTimescale: 48_000),
+            packetDescriptions: nil, sampleBufferOut: &sb)
+        return sb
+    }
+
     /// Isolates "is the encoder/writer broken in this process?" from "are the
     /// SCK buffers bad?": 3 s of 1512x982 NV12 frames drawn on the CPU, same
     /// settings as the screen recorder, then finishWriting.
@@ -313,6 +486,10 @@ enum SelfTest {
         /// `--selftest-synthetic-writer`: same H.264 writer settings fed with
         /// CPU-made NV12 frames instead of ScreenCaptureKit buffers.
         var syntheticWriter: String?
+        /// `--selftest-fragment-probe`: low-frame-rate segment abandoned at
+        /// 50 s; how much of it is still readable, with and without the
+        /// time-capped keyframe setting.
+        var fragmentProbe: [String: String]?
     }
 
     struct RunResult: Codable {
