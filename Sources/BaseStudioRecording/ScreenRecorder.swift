@@ -161,6 +161,14 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// segment's on-disk size and writer status, so the next occurrence shows
     /// when data stopped reaching the disk.
     private var lastSizeLog: CFAbsoluteTime = 0
+    /// Capture watchdog (diagnostics only): when did ScreenCaptureKit last
+    /// deliver a screen callback / an audio buffer? Logged every 5 s from a
+    /// timer that does not depend on frames arriving, so a stalled capture
+    /// source is visible in the log (in the 10/31 take both picture and
+    /// sound vanished for the same 52 s).
+    private var lastScreenCallback: CFAbsoluteTime = 0
+    private var lastAudioCallback: CFAbsoluteTime = 0
+    private var watchdog: DispatchSourceTimer?
     /// Last frame actually encoded + its time. SCK sends no picture while the
     /// screen is static, so without a closing frame the video track ended at
     /// the last *change* (5.2 s of an 8 s take) and export cut the tail —
@@ -393,6 +401,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         do {
             try await attachAndStart(adapter: adapter, captureAudio: captureSystemAudio)
             self.isRunning = true
+            startWatchdog()
             BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio), softwareEncoder=\(useSoftwareEncoder)")
         } catch {
             BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
@@ -665,7 +674,26 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     /// Drop every capture handle and return to non-running. Single source of
     /// truth for teardown so no failure path forgets one. Internal for tests.
+    private func startWatchdog() {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        let started = CFAbsoluteTimeGetCurrent()
+        lastScreenCallback = started; lastAudioCallback = started
+        t.schedule(deadline: .now() + 5, repeating: 5)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            let sinceScreen = now - self.lastScreenCallback, sinceAudio = now - self.lastAudioCallback
+            let msg = String(format: "capture watchdog: last screen callback %.1f s ago, last audio buffer %.1f s ago (received screen=%d audio=%d)",
+                             sinceScreen, sinceAudio, self.screenFramesReceived, self.audioBuffersReceived)
+            if sinceScreen > 5 || (self.captureSystemAudio && sinceAudio > 5) { BSLog.warn(msg) } else { BSLog.info(msg) }
+        }
+        t.resume()
+        watchdog = t
+    }
+
     func resetHandles() {
+        watchdog?.cancel()
+        watchdog = nil
         self.streamAdapter = nil
         self.attachedOutputs = []
         self.writer = nil
@@ -840,6 +868,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     ) {
         guard sampleBuffer.isValid else { return }
 
+        if type == .screen { lastScreenCallback = CFAbsoluteTimeGetCurrent() } else { lastAudioCallback = CFAbsoluteTimeGetCurrent() }
         if type == .screen {
             if let quiet = injectSilenceAfter, let origin = firstPTS,
                CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), origin).seconds > quiet {

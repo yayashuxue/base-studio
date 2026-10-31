@@ -112,6 +112,18 @@ enum SelfTest {
     @MainActor
     private static func run(into report: inout Report) async throws {
         if CommandLine.arguments.contains("--selftest-fragment-probe-realtime") {
+            if CommandLine.arguments.contains("--selftest-video-gap") {
+                // 60 s of a frame per second, then 50 s with no pictures while
+                // audio continues, then one frame at 110 s that triggers the
+                // abandon — the shape of the 10/31 take's segment 2.
+                var r: [String: String] = [:]
+                for hb in [false, true] {
+                    r[hb ? "gap+heartbeat" : "gap"] = await realtimeFragmentProbe(seconds: 110, gap: 60..<110, heartbeat: hb)
+                }
+                report.fragmentProbe = r
+                report.pass = r["gap+heartbeat"]?.hasPrefix("ok") == true
+                return
+            }
             let r = await realtimeFragmentProbe(seconds: 120)
             report.fragmentProbe = ["realtime120": r]
             report.pass = r.hasPrefix("ok")
@@ -342,7 +354,7 @@ enum SelfTest {
     /// Same writer, but paced like a real take on the host clock: audio
     /// buffers every ~21 ms, a picture only every 1–3 s (static screen). The
     /// writer is dropped at `seconds` without finishing.
-    static func realtimeFragmentProbe(seconds: Double) async -> String {
+    static func realtimeFragmentProbe(seconds: Double, gap: Range<Double>? = nil, heartbeat: Bool = false) async -> String {
         let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bs-fragrt-\(UUID().uuidString).mov")
         defer { try? FileManager.default.removeItem(at: url) }
         let w = 1512, h = 982
@@ -367,18 +379,30 @@ enum SelfTest {
         writer.startSession(atSourceTime: t0)
         var audioSamples: Int64 = 0
         var nextFrameAt = 0.0
+        var lastFrame: CVPixelBuffer?
+        var lastFrameAt = 0.0
         var frames = 0
         var i = 0
         while true {
             let now = CMClockGetTime(clock)
             let elapsed = CMTimeSubtract(now, t0).seconds
-            if elapsed >= seconds { break }
+            if elapsed >= seconds {
+                if gap != nil, let pool = adaptor.pixelBufferPool {   // the frame that trips the failure
+                    var pb: CVPixelBuffer?; CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
+                    if let pb, vIn.isReadyForMoreMediaData { _ = adaptor.append(pb, withPresentationTime: now) }
+                }
+                break
+            }
             // audio up to now
             while Double(audioSamples) / 48_000 <= elapsed {
                 if let sb = silentAudio(at: t0.seconds + Double(audioSamples) / 48_000), aIn.isReadyForMoreMediaData { aIn.append(sb) }
                 audioSamples += 1024
             }
-            if elapsed >= nextFrameAt, vIn.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool {
+            let inGap = gap?.contains(elapsed) ?? false
+            if inGap && heartbeat, elapsed - lastFrameAt >= 1, vIn.isReadyForMoreMediaData, let last = lastFrame {
+                if adaptor.append(last, withPresentationTime: now) { lastFrameAt = elapsed }
+            }
+            if !inGap, elapsed >= nextFrameAt, vIn.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool {
                 var pb: CVPixelBuffer?
                 CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
                 if let pb {
@@ -386,10 +410,10 @@ enum SelfTest {
                     if let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0) { memset(y, Int32(30 + (i * 37) % 200), CVPixelBufferGetBytesPerRowOfPlane(pb, 0) * h) }
                     if let uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1) { memset(uv, 128, CVPixelBufferGetBytesPerRowOfPlane(pb, 1) * h / 2) }
                     CVPixelBufferUnlockBaseAddress(pb, [])
-                    if adaptor.append(pb, withPresentationTime: now) { frames += 1 }
+                    if adaptor.append(pb, withPresentationTime: now) { frames += 1; lastFrame = pb; lastFrameAt = elapsed }
                 }
                 i += 1
-                nextFrameAt = elapsed + Double.random(in: 1...3)
+                nextFrameAt = elapsed + (gap == nil ? Double.random(in: 1...3) : 1)
             }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
@@ -403,7 +427,8 @@ enum SelfTest {
             return segs.filter { !$0.isEmpty }.map { $0.timeMapping.target.end.seconds }.max() ?? 0
         }
         let v = await end(.video), a = await end(.audio)
-        let lost = seconds - max(v, a)
+        // With a gap, judge by audio (the picture had nothing new to keep).
+        let lost = gap != nil ? seconds - a : seconds - max(v, a)
         return String(format: "%@: %.0f s take, %d frames, writer status %d; readable video to %.1f s, audio to %.1f s (lost %.1f s)",
                       lost <= 3 ? "ok" : "fail", seconds, frames, status, v, a, lost)
     }
