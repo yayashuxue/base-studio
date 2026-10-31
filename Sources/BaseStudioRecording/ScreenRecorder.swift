@@ -450,10 +450,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
         ]
         if timeCappedKeyframes {
-            // Also cap the keyframe gap in *time*. Fragments can only be cut at
-            // keyframes; with a frame-count limit alone a static screen (a frame
-            // every few seconds) went minutes without a keyframe, so no fragment
-            // was written and a failed segment lost 52 s instead of ~2 s.
+            // Defensive: also cap the keyframe gap in *time* (≤1 s), so a
+            // static screen (a frame every few seconds) still gets regular
+            // keyframes. NOT a proven fix for the 52.8 s loss in the 10/31
+            // take: the fragment probes (--selftest-fragment-probe[-realtime])
+            // show no difference with or without it, and that loss's cause is
+            // still unknown.
             props[AVVideoMaxKeyFrameIntervalDurationKey] = 1.0
         }
         return [
