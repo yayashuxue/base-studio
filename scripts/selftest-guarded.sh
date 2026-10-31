@@ -1,9 +1,9 @@
 #!/bin/bash
 # Run the Base Studio self-test under an independent memory cap.
-# Samples the app's memory every 1 s to a CSV and kills it (keeping logs) if it
-# exceeds CAP_MB. Usage:
+# Samples the app's memory about every 3 s (footprint itself takes ~2 s) to a CSV and kills it (keeping logs) if it
+# exceeds CAP_MB (default 1,500 MB; a normal export is ~100 MB). Usage:
 #   scripts/selftest-guarded.sh <out-dir> [CAP_MB] -- <self-test args...>
-# e.g. scripts/selftest-guarded.sh ~/Movies/BaseStudio/kept/run1 3000 -- \
+# e.g. scripts/selftest-guarded.sh ~/Movies/BaseStudio/kept/run1 1500 -- \
 #        --selftest-record --selftest-no-webcam --selftest-rounds 1 --selftest-seconds 60 --selftest-export-each
 set -u
 # Footprint in MB from the `footprint` header line, e.g.
@@ -35,7 +35,7 @@ monitor() {  # monitor <pid> <cap_mb> <csv>; sets STATUS
 }
 # Validate the cap logic on any process: --watch <pid> <cap_mb> <csv>
 [ "${1:-}" = "--watch" ] && { echo "utc,phys_footprint_mb,rss_mb,locked" > "$4"; monitor "$2" "$3" "$4"; echo "$STATUS"; exit 0; }
-OUT="$1"; CAP_MB="${2:-3000}"; shift 2; [ "${1:-}" = "--" ] && shift
+OUT="$1"; CAP_MB="${2:-1500}"; shift 2; [ "${1:-}" = "--" ] && shift
 APP="$(cd "$(dirname "$0")/.." && pwd)/build/Base Studio.app"
 mkdir -p "$OUT"
 REPORT="$OUT/report.json"; MEM="$OUT/memory.csv"
