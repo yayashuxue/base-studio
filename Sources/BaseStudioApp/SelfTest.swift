@@ -29,6 +29,69 @@ enum SelfTest {
         return "/tmp/base-studio-selftest.json"
     }
 
+    /// `--selftest-seconds N` (default 4). Long takes + the test-only
+    /// BS_INJECT_SCREEN_FAIL_AT_FRAMES env exercise mid-recording encoder recovery.
+    /// `--selftest-rounds N` (default 2): consecutive record → stop → reopen.
+    private static var rounds: Int {
+        if let i = CommandLine.arguments.firstIndex(of: "--selftest-rounds"),
+           i + 1 < CommandLine.arguments.count, let v = Int(CommandLine.arguments[i + 1]) {
+            return max(1, v)
+        }
+        return 2
+    }
+
+    /// `--selftest-sync-markers`: every 3 s flash a small white square in the
+    /// top-left corner and play a short tick through a *separate* process
+    /// (our own audio is excluded from capture). Each export then carries
+    /// matching picture/sound events whose offset is the A/V sync error.
+    @MainActor
+    final class SyncMarkers {
+        private var window: NSWindow?
+        private var timer: Timer?
+        func start() {
+            let screen = NSScreen.main?.frame ?? .zero
+            let w = NSWindow(contentRect: NSRect(x: screen.minX, y: screen.maxY - 160, width: 160, height: 160),
+                             styleMask: .borderless, backing: .buffered, defer: false)
+            w.level = .screenSaver
+            w.backgroundColor = .black
+            w.ignoresMouseEvents = true
+            // Say what this is, in place: people closed the app thinking a
+            // bare black square was a bug. The flash region (top 100 pt) stays
+            // plain so the luma measurement is unaffected.
+            let label = NSTextField(labelWithString: "Base Studio\n同步测试 Sync test\n约 20 分钟 · 请勿关闭")
+            label.textColor = .white
+            label.font = .systemFont(ofSize: 12, weight: .semibold)
+            label.alignment = .center
+            label.maximumNumberOfLines = 3
+            label.frame = NSRect(x: 4, y: 4, width: 152, height: 52)
+            w.contentView?.addSubview(label)
+            w.orderFrontRegardless()
+            window = w
+            timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.flash() }
+            }
+        }
+        private func flash() {
+            window?.backgroundColor = .white
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+            p.arguments = ["-v", "0.15", "/System/Library/Sounds/Tink.aiff"]
+            try? p.run()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.window?.backgroundColor = .black
+            }
+        }
+        func stop() { timer?.invalidate(); window?.orderOut(nil); window = nil }
+    }
+
+    private static var recordSeconds: Double {
+        if let i = CommandLine.arguments.firstIndex(of: "--selftest-seconds"),
+           i + 1 < CommandLine.arguments.count, let v = Double(CommandLine.arguments[i + 1]) {
+            return max(1, v)
+        }
+        return 4
+    }
+
     static func runIfRequested() {
         guard isRequested else { return }
         Task { @MainActor in
@@ -48,6 +111,11 @@ enum SelfTest {
 
     @MainActor
     private static func run(into report: inout Report) async throws {
+        if CommandLine.arguments.contains("--selftest-synthetic-writer") {
+            report.syntheticWriter = await syntheticWriterProbe()
+            report.pass = report.syntheticWriter?.hasPrefix("ok") == true
+            return
+        }
         let dir = try recordingsDir()
         var lastBundle: ProjectBundle?
 
@@ -67,13 +135,20 @@ enum SelfTest {
         // concurrent webcam H.264 session (to tell a concurrent-encoder startup
         // race apart from a resolution / machine-state issue).
         let withWebcam = !CommandLine.arguments.contains("--selftest-no-webcam")
-        for i in 1...2 {
+        let markers = CommandLine.arguments.contains("--selftest-sync-markers") ? SyncMarkers() : nil
+        markers?.start()
+        defer { markers?.stop() }
+        let exportEach = CommandLine.arguments.contains("--selftest-export-each")
+        for i in 1...rounds {
             var r = RunResult(index: i)
             let session = RecordingSession(options: .init(
                 includeWebcam: withWebcam, includeSystemAudio: true, includeMic: withWebcam
             ))
+            // Fresh bundle every run — leftovers from earlier runs (edl.json,
+            // failure.json, exports) made good takes look broken.
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("selftest-\(i).basestudio"))
             let bundle = try await session.start(in: dir, name: "selftest-\(i)")
-            try await Task.sleep(nanoseconds: 4_000_000_000)
+            try await Task.sleep(nanoseconds: UInt64(recordSeconds * 1_000_000_000))
             _ = try await session.stop()
             lastBundle = bundle
 
@@ -105,9 +180,28 @@ enum SelfTest {
                 r.openOk = false
                 r.openError = "\(error)"
             }
+            // The screen must cover (almost) the whole take — a recovered
+            // encoder failure may cost < 1 s, never the rest of the take.
+            r.recordSeconds = recordSeconds
             r.pass = !r.failureJson && r.metadata && r.screenTrack
-                && r.screenDurationSec > 1.0 && r.openOk
+                && r.screenDurationSec > max(1.0, recordSeconds - 1.5)
+                && r.screenDurationSec < recordSeconds + 3   // too long is a bug too (60 s take → 119 s)
+                && r.openOk
                 && (!withWebcam || (r.webcamTrack && r.micTrack))
+            if exportEach {
+                do {
+                    let editor = try EditorState.load(bundleURL: bundle.url)
+                    let out = bundle.url.appendingPathComponent("selftest-export.mp4")
+                    let url = try await ExportPipeline().run(.init(
+                        project: editor.project, bundleURL: bundle.url,
+                        outputURL: out, fps: 60, bitrate: 8_000_000, audioMode: .both
+                    ))
+                    r.exportSec = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
+                } catch {
+                    r.exportError = "\(error)"
+                }
+                r.pass = r.pass && r.exportSec > max(1.0, recordSeconds - 1.5) && r.exportSec < recordSeconds + 3
+            }
             report.runs.append(r)
         }
 
@@ -161,6 +255,54 @@ enum SelfTest {
         }
     }
 
+    /// Isolates "is the encoder/writer broken in this process?" from "are the
+    /// SCK buffers bad?": 3 s of 1512x982 NV12 frames drawn on the CPU, same
+    /// settings as the screen recorder, then finishWriting.
+    static func syntheticWriterProbe() async -> String {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bs-synth-\(UUID().uuidString).mov")
+        let w = 1512, h = 982, fps = 60
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return "fail: writer init" }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: w, AVVideoHeightKey: h,
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: max(8_000_000, w * h * fps / 12),
+                                              AVVideoMaxKeyFrameIntervalKey: fps * 2,
+                                              AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel],
+        ])
+        input.expectsMediaDataInRealTime = true
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ])
+        writer.add(input)
+        guard writer.startWriting() else { return "fail: startWriting \(String(describing: writer.error))" }
+        writer.startSession(atSourceTime: .zero)
+        var appended = 0
+        for i in 0..<(fps * 3) {
+            while !input.isReadyForMoreMediaData { try? await Task.sleep(nanoseconds: 2_000_000) }
+            guard let pool = adaptor.pixelBufferPool else { return "fail: no pool, status=\(writer.status.rawValue) \(String(describing: writer.error))" }
+            var pb: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
+            guard let pb else { return "fail: no buffer" }
+            CVPixelBufferLockBaseAddress(pb, [])
+            if let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0) {
+                memset(y, Int32(16 + (i * 3) % 200), CVPixelBufferGetBytesPerRowOfPlane(pb, 0) * h)
+            }
+            if let uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1) {
+                memset(uv, 128, CVPixelBufferGetBytesPerRowOfPlane(pb, 1) * h / 2)
+            }
+            CVPixelBufferUnlockBaseAddress(pb, [])
+            if !adaptor.append(pb, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps))) {
+                return "fail: append at frame \(i), status=\(writer.status.rawValue) \(String(describing: writer.error))"
+            }
+            appended += 1
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        defer { try? FileManager.default.removeItem(at: url) }
+        return writer.status == .completed ? "ok: \(appended) frames finalized" : "fail: finish status=\(writer.status.rawValue) \(String(describing: writer.error))"
+    }
+
     struct Report: Codable {
         var runs: [RunResult] = []
         var exportOk = false
@@ -168,6 +310,9 @@ enum SelfTest {
         var exportError: String?
         var error: String?
         var pass = false
+        /// `--selftest-synthetic-writer`: same H.264 writer settings fed with
+        /// CPU-made NV12 frames instead of ScreenCaptureKit buffers.
+        var syntheticWriter: String?
     }
 
     struct RunResult: Codable {
@@ -178,6 +323,9 @@ enum SelfTest {
         var screenTrack = false
         var screenDims = ""
         var screenDurationSec: Double = 0
+        var recordSeconds: Double = 0
+        var exportSec: Double = 0
+        var exportError: String?
         var webcamTrack = false
         var micTrack = false
         var openOk = false

@@ -97,9 +97,23 @@ public final class ExportPipeline {
         if FileManager.default.fileExists(atPath: input.outputURL.path) {
             try FileManager.default.removeItem(at: input.outputURL)
         }
+        // Video and audio are written in separate passes and muxed at the end.
+        // One writer holding both inputs deadlocked: a non-realtime writer
+        // interleaves inputs, so after ~1 s of video it waits for audio — and
+        // audio was only appended after all video (or never, when muted). The
+        // export stalled after ~12 frames.
+        let workDir = input.outputURL.deletingLastPathComponent()
+        let videoTmpURL = workDir.appendingPathComponent(".export-video-\(UUID().uuidString).mp4")
+        let audioTmpURL = workDir.appendingPathComponent(".export-audio-\(UUID().uuidString).m4a")
+        defer {
+            if ProcessInfo.processInfo.environment["BS_KEEP_EXPORT_TEMPS"] == nil {
+                try? FileManager.default.removeItem(at: videoTmpURL)
+                try? FileManager.default.removeItem(at: audioTmpURL)
+            }
+        }
         let writer: AVAssetWriter
         do {
-            writer = try AVAssetWriter(outputURL: input.outputURL, fileType: .mp4)
+            writer = try AVAssetWriter(outputURL: videoTmpURL, fileType: .mp4)
         } catch {
             throw ExportError.writerSetupFailed(error.localizedDescription)
         }
@@ -137,13 +151,6 @@ public final class ExportPipeline {
             AVSampleRateKey: 48_000,
             AVEncoderBitRateKey: 192_000,
         ]
-        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioOutSettings)
-        audioInput.expectsMediaDataInRealTime = false
-        var audioInputAdded = false
-        if writer.canAdd(audioInput) {
-            writer.add(audioInput)
-            audioInputAdded = true
-        }
 
         guard writer.startWriting() else {
             throw ExportError.writerSetupFailed(writer.error?.localizedDescription ?? "?")
@@ -154,7 +161,7 @@ public final class ExportPipeline {
         let ciContext = CIContext(options: [
             .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any,
             .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any,
-            .useSoftwareRenderer: false,
+            .useSoftwareRenderer: ProcessInfo.processInfo.environment["BS_EXPORT_SW_RENDER"] == "1",
         ])
 
         // 6. Iterate primary frames; reader.pts is file-time.
@@ -203,10 +210,12 @@ public final class ExportPipeline {
                 let timelinePTS = CMTimeSubtract(frame.pts, segInFileTime)
                 currentTimelinePTS = timelinePTS
 
-                while !videoInput.isReadyForMoreMediaData {
-                    try await Task.sleep(nanoseconds: 1_000_000)
-                }
-                try renderAndAppend(
+                try await Self.waitUntilReady(videoInput, writer: writer, appendedFrames: frameCount)
+                // Drain per frame: CIImage graphs, the rendered pixel buffer and
+                // the decoded source frame are autoreleased; without a pool the
+                // whole export kept every frame alive (~8 MB each at 1080p —
+                // a 6,400-frame take reached ~40 GB and froze the Mac).
+                try autoreleasepool { try renderAndAppend(
                     project: input.project, primaryFrame: frame.image, timelinePTS: timelinePTS,
                     sidecarOffset: sidecarOffset, primary: primary,
                     sidecars: sidecars, ciContext: ciContext,
@@ -215,7 +224,7 @@ public final class ExportPipeline {
                     adaptor: adaptor,
                     backgroundImage: backgroundImage,
                     frameProvider: frameProvider
-                )
+                ) }
                 frameCount += 1
                 if frameCount % 5 == 0, timelineDurationSec > 0 {
                     onProgress?(min(1.0, timelinePTS.seconds / timelineDurationSec))
@@ -247,10 +256,12 @@ public final class ExportPipeline {
                 }
                 let primaryFrame = CIImage(cgImage: cg)
 
-                while !videoInput.isReadyForMoreMediaData {
-                    try await Task.sleep(nanoseconds: 1_000_000)
-                }
-                try renderAndAppend(
+                try await Self.waitUntilReady(videoInput, writer: writer, appendedFrames: frameCount)
+                // Drain per frame: CIImage graphs, the rendered pixel buffer and
+                // the decoded source frame are autoreleased; without a pool the
+                // whole export kept every frame alive (~8 MB each at 1080p —
+                // a 6,400-frame take reached ~40 GB and froze the Mac).
+                try autoreleasepool { try renderAndAppend(
                     project: input.project, primaryFrame: primaryFrame, timelinePTS: timelinePTS,
                     sidecarOffset: sidecarOffset, primary: primary,
                     sidecars: sidecars, ciContext: ciContext,
@@ -259,7 +270,7 @@ public final class ExportPipeline {
                     adaptor: adaptor,
                     backgroundImage: backgroundImage,
                     frameProvider: frameProvider
-                )
+                ) }
                 frameCount += 1
                 if frameCount % 10 == 0, timelineDurationSec > 0 {
                     onProgress?(min(1.0, timelineSec / timelineDurationSec))
@@ -267,11 +278,31 @@ public final class ExportPipeline {
             }
         }
 
+        BSLog.info("export video pass: frames=\(frameCount), segIn=\(segInFileTime.seconds), segOut=\(segOutFileTime.seconds), timeline=\(timelineDurationSec), lastTimelinePTS=\(currentTimelinePTS.seconds)")
         videoInput.markAsFinished()
+        // Same reason as the recorder: pin the end, don't let the last
+        // frame's duration be guessed from the previous gap.
+        writer.endSession(atSourceTime: CMTime(seconds: timelineDurationSec, preferredTimescale: 600))
+        await writer.finishWriting()
+        if writer.status != .completed {
+            throw ExportError.writerSetupFailed(
+                writer.error?.localizedDescription ?? "video writer failed: \(writer.status.rawValue)"
+            )
+        }
 
-        // Audio mix: AudioMixer.Source.originPTS is in *file-time* (not host).
+        // Audio pass: its own writer, so nothing waits on the other track.
+        // AudioMixer.Source.originPTS is in *file-time* (not host).
         // Each source has its own first-frame anchor — convert per-source.
-        if audioInputAdded && input.audioMode != .mute {
+        var audioWritten = false
+        if input.audioMode != .mute {
+            let audioWriter = try AVAssetWriter(outputURL: audioTmpURL, fileType: .m4a)
+            let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioOutSettings)
+            audioInput.expectsMediaDataInRealTime = false
+            audioWriter.add(audioInput)
+            guard audioWriter.startWriting() else {
+                throw ExportError.writerSetupFailed(audioWriter.error?.localizedDescription ?? "audio writer")
+            }
+            audioWriter.startSession(atSourceTime: .zero)
             let micURL = input.bundleURL.appendingPathComponent("mic.m4a")
             let hasMic = FileManager.default.fileExists(atPath: micURL.path)
             let hasSystemAudio = await assetHasAudio(primaryURL)
@@ -303,14 +334,15 @@ public final class ExportPipeline {
                 BSLog.error("audio mix failed (\(error)); finishing video-only export.")
             }
             audioInput.markAsFinished()
+            await audioWriter.finishWriting()
+            let audioTracks = (try? await AVURLAsset(url: audioTmpURL).loadTracks(withMediaType: .audio)) ?? []
+            audioWritten = audioWriter.status == .completed && !audioTracks.isEmpty
+            if !audioWritten {
+                BSLog.warn("audio pass produced no track (\(String(describing: audioWriter.error))); exporting video only.")
+            }
         }
 
-        await writer.finishWriting()
-        if writer.status != .completed {
-            throw ExportError.writerSetupFailed(
-                writer.error?.localizedDescription ?? "writer failed: \(writer.status.rawValue)"
-            )
-        }
+        try await Self.mux(video: videoTmpURL, audio: audioWritten ? audioTmpURL : nil, into: input.outputURL)
         onProgress?(1.0)
         return input.outputURL
     }
@@ -353,7 +385,123 @@ public final class ExportPipeline {
             bounds: CGRect(x: 0, y: 0, width: outW, height: outH),
             colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
         )
-        adaptor.append(pixelBuffer, withPresentationTime: timelinePTS)
+        if !adaptor.append(pixelBuffer, withPresentationTime: timelinePTS) {
+            throw ExportError.writerSetupFailed("video encoder rejected frame at \(timelinePTS.seconds)s")
+        }
+    }
+
+    /// Combine the video-only and audio-only passes into the final .mp4
+    /// without re-encoding: copy compressed samples through a passthrough
+    /// AVAssetWriter. AVAssetExportSession passthrough dropped the AAC priming
+    /// trim (2112 samples), playing the priming as content — export audio
+    /// came out 44 ms late. The writer keeps the trim attachment the first
+    /// audio sample carries. Both inputs are fed from their own
+    /// requestMediaDataWhenReady callbacks so interleaving can't deadlock.
+    static func mux(video: URL, audio: URL?, into output: URL) async throws {
+        try? FileManager.default.removeItem(at: output)
+        guard let audio else {
+            try FileManager.default.moveItem(at: video, to: output)
+            return
+        }
+        let vAsset = AVURLAsset(url: video)
+        let aAsset = AVURLAsset(url: audio)
+        guard let vTrack = try await vAsset.loadTracks(withMediaType: .video).first else {
+            throw ExportError.writerSetupFailed("mux: no video track")
+        }
+        let vDuration = try await vAsset.load(.duration)
+        let aTrack = try await aAsset.loadTracks(withMediaType: .audio).first
+        let vFormat = try await vTrack.load(.formatDescriptions).first
+        let vTransform = try await vTrack.load(.preferredTransform)
+
+        let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: vFormat)
+        vIn.transform = vTransform
+        writer.add(vIn)
+        var pairs: [(AVAssetReaderTrackOutput, AVAssetWriterInput, AVAssetReader, CMTime?)] = []
+        let vReader = try AVAssetReader(asset: vAsset)
+        let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: nil)
+        vReader.add(vOut)
+        pairs.append((vOut, vIn, vReader, nil))
+        if let aTrack {
+            let aFormat = try await aTrack.load(.formatDescriptions).first
+            let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: aFormat)
+            writer.add(aIn)
+            let aReader = try AVAssetReader(asset: aAsset)
+            let aOut = AVAssetReaderTrackOutput(track: aTrack, outputSettings: nil)
+            aReader.add(aOut)
+            // Never let audio run past the picture.
+            pairs.append((aOut, aIn, aReader, vDuration))
+        }
+        for (_, _, reader, _) in pairs where !reader.startReading() {
+            throw ExportError.writerSetupFailed("mux: reader failed: \(String(describing: reader.error))")
+        }
+        guard writer.startWriting() else {
+            throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))")
+        }
+        writer.startSession(atSourceTime: .zero)
+        // One loop, two streams: always append the earlier of the two pending
+        // samples, waiting (bounded) for that input. The writer interleaves
+        // tracks, so the earliest-first order is exactly what it asks for; the
+        // earlier callback-per-input version deadlocked on a 10 s 1080p export.
+        var heads: [CMSampleBuffer?] = pairs.map { $0.0.copyNextSampleBuffer() }
+        var done = pairs.map { _ in false }
+        func pts(_ sb: CMSampleBuffer) -> CMTime { CMSampleBufferGetPresentationTimeStamp(sb) }
+        while true {
+            var pick: Int?
+            for k in pairs.indices where !done[k] {
+                guard let sb = heads[k], pairs[k].3.map({ CMTimeCompare(pts(sb), $0) < 0 }) ?? true else {
+                    pairs[k].1.markAsFinished(); done[k] = true; continue
+                }
+                if pick == nil || CMTimeCompare(pts(sb), pts(heads[pick!]!)) < 0 { pick = k }
+            }
+            guard let k = pick, let sb = heads[k] else { break }
+            let input = pairs[k].1
+            let started = Date()
+            while !input.isReadyForMoreMediaData {
+                if writer.status == .failed { throw ExportError.writerSetupFailed("mux: \(String(describing: writer.error))") }
+                if Date().timeIntervalSince(started) > 20 { throw ExportError.writerSetupFailed("mux: input stalled for 20 s") }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            if !input.append(sb) {
+                throw ExportError.writerSetupFailed("mux append failed: \(String(describing: writer.error))")
+            }
+            heads[k] = pairs[k].0.copyNextSampleBuffer()
+        }
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw ExportError.writerSetupFailed("mux failed: \(String(describing: writer.error))")
+        }
+        // The .mp4 writer keeps the priming trim only as a sample attachment
+        // (Apple players honour it, ffmpeg-based ones don't: they played the
+        // 2112 priming samples and ran audio 44 ms late). The .m4a pass carries
+        // the standard iTunSMPB tag both understand; copy it over.
+        if aTrack != nil {
+            let finalAudio = try? await AVURLAsset(url: output).loadTracks(withMediaType: .audio).first?.load(.timeRange)
+            let samples = finalAudio.map { Int64(($0.duration.seconds * 48_000).rounded()) }
+            // Fail the export rather than ship a file ffmpeg players hear 44 ms late.
+            do {
+                try ITunSMPB.copy(from: audio, into: output, validSamples: samples)
+            } catch {
+                try? FileManager.default.removeItem(at: output)
+                throw ExportError.writerSetupFailed("could not tag AAC priming in export: \(error)")
+            }
+        }
+    }
+
+    /// Wait for the encoder to take more input — but never forever. A dead
+    /// encoder (writer `.failed`) never becomes ready again; spinning on it was
+    /// the export "hang". Surface the writer's real error instead.
+    static func waitUntilReady(_ input: AVAssetWriterInput, writer: AVAssetWriter, appendedFrames: Int = -1, timeout: TimeInterval = 20) async throws {
+        let start = Date()
+        while !input.isReadyForMoreMediaData {
+            if writer.status == .failed || writer.status == .cancelled {
+                throw ExportError.writerSetupFailed("video encoder failed: \(String(describing: writer.error))")
+            }
+            if Date().timeIntervalSince(start) > timeout {
+                throw ExportError.writerSetupFailed("video encoder stalled for \(Int(timeout))s (status \(writer.status.rawValue), after \(appendedFrames) frames)")
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
     }
 
     private func assetHasAudio(_ url: URL) async -> Bool {
