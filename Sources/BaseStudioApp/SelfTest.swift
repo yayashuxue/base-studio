@@ -180,13 +180,21 @@ enum SelfTest {
         for i in 1...rounds {
             var r = RunResult(index: i)
             let session = RecordingSession(options: .init(
-                includeWebcam: withWebcam, includeSystemAudio: true, includeMic: withWebcam
+                includeWebcam: withWebcam, includeSystemAudio: true, includeMic: withWebcam,
+                capturesOwnWindows: markers != nil
             ))
             // New bundle every run, named by run time; earlier takes are kept
             // (never removed — one was the only copy of a 330 s take).
             let bundle = try await session.start(in: dir, name: "selftest-\(runID)-\(i)")
             r.bundlePath = bundle.url.path
+            // --selftest-camera-bubble: show the self-view like a real take,
+            // to check it stays out of screen.mov.
+            let bubble = CameraBubble()
+            if CommandLine.arguments.contains("--selftest-camera-bubble"), let cam = session.webcamCaptureSession {
+                bubble.show(session: cam)
+            }
             try await Task.sleep(nanoseconds: UInt64(recordSeconds * 1_000_000_000))
+            bubble.hide()
             _ = try await session.stop()
             lastBundle = bundle
 

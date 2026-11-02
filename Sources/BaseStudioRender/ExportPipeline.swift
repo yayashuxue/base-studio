@@ -303,24 +303,9 @@ public final class ExportPipeline {
                 throw ExportError.writerSetupFailed(audioWriter.error?.localizedDescription ?? "audio writer")
             }
             audioWriter.startSession(atSourceTime: .zero)
-            let micURL = input.bundleURL.appendingPathComponent("mic.m4a")
-            let hasMic = FileManager.default.fileExists(atPath: micURL.path)
-            let hasSystemAudio = await assetHasAudio(primaryURL)
-
-            var sources: [AudioMixer.Source] = []
-            let useSystem = (input.audioMode == .both || input.audioMode == .systemOnly) && hasSystemAudio
-            let useMic = (input.audioMode == .both || input.audioMode == .micOnly) && hasMic
-            if useSystem {
-                sources.append(.init(url: primaryURL, originPTS: segInFileTime, gain: 0.85))
-            }
-            if useMic {
-                // Legacy bundles (pre-`micFirstPTS`) assumed mic shared the
-                // screen anchor. micOrigin may be negative (mic started after
-                // segIn) — the mixer treats that as silence until -origin.
-                let micHostFirstPTS = meta.micFirstPTS?.cmTime ?? originPTS
-                let micOrigin = CMTimeSubtract(segIn, micHostFirstPTS)
-                sources.append(.init(url: micURL, originPTS: micOrigin, gain: 1.0))
-            }
+            let sources = await AudioPlan.sources(
+                project: input.project, bundleURL: input.bundleURL, meta: meta, mode: input.audioMode
+            )
 
             do {
                 let timelineDur = CMTime(seconds: timelineDurationSec, preferredTimescale: 600)
@@ -505,14 +490,6 @@ public final class ExportPipeline {
             }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
-    }
-
-    private func assetHasAudio(_ url: URL) async -> Bool {
-        let asset = AVURLAsset(url: url)
-        if let tracks = try? await asset.loadTracks(withMediaType: .audio) {
-            return !tracks.isEmpty
-        }
-        return false
     }
 
     /// (Unused after AudioMixer landed; kept as fallback for single-source pass-through.)

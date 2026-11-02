@@ -42,6 +42,10 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
 
     public override init() { super.init() }
 
+    /// The running capture session, for a live self-view preview layer.
+    /// Same session as the recording, so the camera is opened only once.
+    public var captureSession: AVCaptureSession? { session }
+
     public func start(outputURL: URL) async throws {
         guard !isRunning else { throw WebcamRecorderError.alreadyRunning }
 

@@ -220,16 +220,23 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     private let captureTarget: CaptureTarget?
     private let levels: AudioLevels?
+    /// Display capture leaves out Base Studio's own windows (Stop dock,
+    /// camera bubble) unless this is set — the webcam is composited from its
+    /// own track at export, so a captured bubble would show two faces. The
+    /// sync-marker self-test sets it: its flash window must be recorded.
+    private let capturesOwnWindows: Bool
     public var sharedLevels: AudioLevels? { levels }
 
     public init(
         captureSystemAudio: Bool = true,
         captureTarget: CaptureTarget? = nil,
-        levels: AudioLevels? = nil
+        levels: AudioLevels? = nil,
+        capturesOwnWindows: Bool = false
     ) {
         self.captureSystemAudio = captureSystemAudio
         self.captureTarget = captureTarget
         self.levels = levels
+        self.capturesOwnWindows = capturesOwnWindows
         super.init()
     }
 
@@ -330,7 +337,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             )
             widthPx = physical.0
             heightPx = physical.1
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            let ownApps = capturesOwnWindows ? [] : content.applications.filter { $0.processID == ownPID }
+            filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
+            BSLog.info("display capture excludes own windows: \(!ownApps.isEmpty)")
             self.displayOriginPt = nsScreen?.frame.origin ?? .zero
             self.displaySizePt = nsScreen?.frame.size
                 ?? CGSize(width: Double(display.width), height: Double(display.height))

@@ -1,3 +1,4 @@
+import AVFoundation
 import BaseStudioCore
 import Foundation
 
@@ -43,18 +44,22 @@ public final class RecordingSession {
         public var includeMic: Bool
         public var cursorSampleHz: Int
         public var captureTarget: CaptureTarget?
+        /// Record Base Studio's own windows too (sync-marker self-test only).
+        public var capturesOwnWindows: Bool
         public init(
             includeWebcam: Bool = false,
             includeSystemAudio: Bool = true,
             includeMic: Bool = false,
             cursorSampleHz: Int = 120,
-            captureTarget: CaptureTarget? = nil
+            captureTarget: CaptureTarget? = nil,
+            capturesOwnWindows: Bool = false
         ) {
             self.includeWebcam = includeWebcam
             self.includeSystemAudio = includeSystemAudio
             self.includeMic = includeMic
             self.cursorSampleHz = cursorSampleHz
             self.captureTarget = captureTarget
+            self.capturesOwnWindows = capturesOwnWindows
         }
     }
 
@@ -72,12 +77,18 @@ public final class RecordingSession {
         self.screenRecorder = ScreenRecorder(
             captureSystemAudio: options.includeSystemAudio,
             captureTarget: options.captureTarget,
-            levels: levels
+            levels: levels,
+            capturesOwnWindows: options.capturesOwnWindows
         )
         self.cursorRecorder = CursorRecorder(sampleHz: options.cursorSampleHz)
         self.micRecorder = MicRecorder(levels: levels)
         // Reassign with the shared instance so audioLevels reads from the same one.
         // (audioLevels is `let`; we pass `levels` to the recorders directly.)
+    }
+
+    /// The webcam's capture session while recording (nil without webcam).
+    public var webcamCaptureSession: AVCaptureSession? {
+        options.includeWebcam ? webcamRecorder.captureSession : nil
     }
 
     public var levels: AudioLevels {

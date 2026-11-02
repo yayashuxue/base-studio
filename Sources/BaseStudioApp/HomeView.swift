@@ -367,6 +367,12 @@ struct HomeView: View {
                 title: "Webcam", systemImage: "person.crop.circle.fill",
                 isOn: $vm.includeWebcam
             )
+            if vm.includeWebcam {
+                optionPill(
+                    title: "Camera preview", systemImage: "eye.fill",
+                    isOn: $vm.showCameraWhileRecording
+                )
+            }
             optionPill(
                 title: "System audio", systemImage: "speaker.wave.2.fill",
                 isOn: $vm.includeSystemAudio
