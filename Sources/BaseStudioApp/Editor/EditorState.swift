@@ -16,7 +16,7 @@ final class EditorState: ObservableObject {
         didSet {
             cachedTimeMap = nil
             cachedSourcesByID = nil
-            previewAudioStale = true
+            previewAudio.stale = true
             // Reload disk-backed bg only when filename changes — otherwise
             // playhead scrubbing keeps re-decoding the PNG.
             if oldValue.backgroundImageRel != project.backgroundImageRel {
@@ -55,12 +55,23 @@ final class EditorState: ObservableObject {
     /// `renderPending` and the running render re-schedules itself.
     private var renderInFlight = false
     private var renderPending = false
-    private var playTimer: Timer?
-    /// Plays the take's sound while previewing (built from the same sources
-    /// and TimeMap as export). While it is playing, its clock drives the
-    /// playhead so picture follows sound.
-    private let audioPlayer = AVPlayer()
-    private var previewAudioStale = true
+    /// The take's sound while previewing (same sources and TimeMap as
+    /// export); its clock drives the playhead — see PreviewClock.
+    private lazy var previewAudio = PlayerPreviewAudio { [weak self] in await self?.makePreviewAudioItem() }
+    private lazy var clock: PreviewClock = {
+        let c = PreviewClock(output: previewAudio)
+        c.onTick = { [weak self] sec, ended in
+            guard let self else { return }
+            if ended {
+                self.isPlaying = false
+                self.playheadSec = 0
+            } else {
+                self.playheadSec = sec
+            }
+            self.scheduleRender()
+        }
+        return c
+    }()
     private var saveDebounce: Timer?
 
     // Undo/redo stacks of Project snapshots (immutable Codable structs).
@@ -361,9 +372,7 @@ final class EditorState: ObservableObject {
 
     func setPlayhead(_ sec: Double) {
         playheadSec = max(0, min(timelineDurationSec, sec))
-        if isPlaying, audioPlayer.currentItem != nil {
-            audioPlayer.seek(to: playheadPTS, toleranceBefore: .zero, toleranceAfter: .zero)
-        }
+        clock.seek(to: playheadSec)
         scheduleRender()
     }
 
@@ -376,58 +385,29 @@ final class EditorState: ObservableObject {
     func play() {
         guard !isPlaying else { return }
         isPlaying = true
-        playTimer?.invalidate()
-        Task { await startPreviewAudio() }
         // 24fps for editor preview: per-frame HEVC decode + pipeline still
-        // routinely exceeds 33ms on 4K screen recordings, and a 30fps timer
-        // just queues up renders the playback can't catch. Export still
-        // runs at 60fps; this is a UI-only knob.
-        let interval: TimeInterval = 1.0 / 24.0
-        playTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                if self.audioPlayer.timeControlStatus == .playing {
-                    self.playheadSec = self.audioPlayer.currentTime().seconds
-                } else {
-                    self.playheadSec += interval
-                }
-                if self.playheadSec >= self.timelineDurationSec {
-                    self.pause()
-                    self.playheadSec = 0
-                }
-                self.scheduleRender()
-            }
-        }
+        // routinely exceeds 33ms on 4K screen recordings. Export still runs
+        // at 60fps; this is a UI-only knob (PreviewClock's interval).
+        clock.play(from: playheadSec, duration: timelineDurationSec)
     }
 
     func pause() {
         isPlaying = false
-        playTimer?.invalidate()
-        playTimer = nil
-        audioPlayer.pause()
+        clock.pause()
     }
 
-    private func startPreviewAudio() async {
-        if previewAudioStale {
-            previewAudioStale = false
-            let sources = await AudioPlan.sources(project: project, bundleURL: bundleURL, meta: recordingMeta)
-            do {
-                if let built = try await PreviewAudio.build(sources: sources, timeMap: timeMap) {
-                    let item = AVPlayerItem(asset: built.composition)
-                    item.audioMix = built.audioMix
-                    item.audioTimePitchAlgorithm = .spectral
-                    audioPlayer.replaceCurrentItem(with: item)
-                } else {
-                    audioPlayer.replaceCurrentItem(with: nil)
-                }
-            } catch {
-                BSLog.warn("preview audio unavailable (\(error)); playing picture only")
-                audioPlayer.replaceCurrentItem(with: nil)
-            }
+    private func makePreviewAudioItem() async -> AVPlayerItem? {
+        let sources = await AudioPlan.sources(project: project, bundleURL: bundleURL, meta: recordingMeta)
+        do {
+            guard let built = try await PreviewAudio.build(sources: sources, timeMap: timeMap) else { return nil }
+            let item = AVPlayerItem(asset: built.composition)
+            item.audioMix = built.audioMix
+            item.audioTimePitchAlgorithm = .spectral
+            return item
+        } catch {
+            BSLog.warn("preview audio unavailable (\(error)); playing picture only")
+            return nil
         }
-        guard isPlaying, audioPlayer.currentItem != nil else { return }
-        await audioPlayer.seek(to: playheadPTS, toleranceBefore: .zero, toleranceAfter: .zero)
-        if isPlaying { audioPlayer.play() }
     }
 
     // MARK: - rendering
