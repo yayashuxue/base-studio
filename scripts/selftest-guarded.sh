@@ -48,12 +48,15 @@ fi
 if [ -z "${ALLOW_LOCKED:-}" ] && [ "$(ioreg -n Root -d1 | grep -o 'IOConsoleLocked" = [A-Za-z]*' | awk '{print $3}')" != "No" ]; then
   echo "Screen is locked — not starting the test." | tee "$OUT/summary.txt"; exit 4
 fi
-# The self-test reuses ~/Movies/BaseStudio/SelfTest/selftest-N; move any
-# earlier take aside first so a new run never overwrites a kept sample.
+# The app now writes every take to a new bundle; as a second guard (and for
+# an older build) move earlier takes aside first, and stop if that fails.
 ST=~/Movies/BaseStudio/SelfTest
 if [ -n "$(ls -A "$ST" 2>/dev/null)" ]; then
   KEEP=~/Movies/BaseStudio/kept/selftest-before-$(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p "$KEEP" && mv "$ST"/* "$KEEP"/ && echo "moved earlier self-test takes to $KEEP"
+  if ! { mkdir -p "$KEEP" && mv "$ST"/* "$KEEP"/; } || [ -n "$(ls -A "$ST" 2>/dev/null)" ]; then
+    echo "could not move earlier self-test takes out of $ST — not starting the test." | tee "$OUT/summary.txt"; exit 5
+  fi
+  echo "moved earlier self-test takes to $KEEP"
 fi
 START_DAY=$(date -u +%Y%m%d)
 caffeinate -d -u -t 2400 >/dev/null 2>&1 & CAF=$!

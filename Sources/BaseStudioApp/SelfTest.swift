@@ -171,15 +171,21 @@ enum SelfTest {
         markers?.start()
         defer { markers?.stop() }
         let exportEach = CommandLine.arguments.contains("--selftest-export-each")
+        let runID: String = {
+            let f = DateFormatter()
+            f.dateFormat = "yyyyMMdd-HHmmss"
+            f.timeZone = TimeZone(identifier: "UTC")
+            return f.string(from: Date())
+        }()
         for i in 1...rounds {
             var r = RunResult(index: i)
             let session = RecordingSession(options: .init(
                 includeWebcam: withWebcam, includeSystemAudio: true, includeMic: withWebcam
             ))
-            // Fresh bundle every run — leftovers from earlier runs (edl.json,
-            // failure.json, exports) made good takes look broken.
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent("selftest-\(i).basestudio"))
-            let bundle = try await session.start(in: dir, name: "selftest-\(i)")
+            // New bundle every run, named by run time; earlier takes are kept
+            // (never removed — one was the only copy of a 330 s take).
+            let bundle = try await session.start(in: dir, name: "selftest-\(runID)-\(i)")
+            r.bundlePath = bundle.url.path
             try await Task.sleep(nanoseconds: UInt64(recordSeconds * 1_000_000_000))
             _ = try await session.stop()
             lastBundle = bundle
@@ -519,6 +525,7 @@ enum SelfTest {
 
     struct RunResult: Codable {
         var index: Int
+        var bundlePath = ""
         var pass = false
         var failureJson = false
         var metadata = false

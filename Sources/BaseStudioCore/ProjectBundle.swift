@@ -25,13 +25,26 @@ public struct ProjectBundle {
         self.url = url
     }
 
+    /// Always a NEW, empty bundle: if `<name>.basestudio` exists (two takes
+    /// in the same second, a re-run self-test) the next free `<name>-2`,
+    /// `<name>-3`, … is used. An existing recording is never reused or
+    /// overwritten — a re-run once replaced the only copy of a 330 s take.
     public static func create(in directory: URL, name: String) throws -> ProjectBundle {
-        let bundleURL = directory
-            .appendingPathComponent("\(name).basestudio", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: bundleURL, withIntermediateDirectories: true
-        )
-        return ProjectBundle(url: bundleURL)
+        let fm = FileManager.default
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        for n in 1...10_000 {
+            let stem = n == 1 ? name : "\(name)-\(n)"
+            let bundleURL = directory.appendingPathComponent("\(stem).basestudio", isDirectory: true)
+            do {
+                // Without intermediates, createDirectory fails if it exists —
+                // check and claim in one step, no race with a second recorder.
+                try fm.createDirectory(at: bundleURL, withIntermediateDirectories: false)
+                return ProjectBundle(url: bundleURL)
+            } catch CocoaError.fileWriteFileExists {
+                continue
+            }
+        }
+        throw CocoaError(.fileWriteFileExists)
     }
 }
 

@@ -101,13 +101,9 @@ public final class RecordingSession {
         // take the whole app down.
         guard state == .idle else { throw RecordingSessionError.alreadyRunning }
         let bundle = try ProjectBundle.create(in: directory, name: name)
+        // `create` always returns a new, empty bundle, so no earlier take's
+        // failure.json / edl.json can leak into this one.
         self.bundle = bundle
-        // A reused bundle name must not inherit a previous take's failure
-        // record — it would mark this take as failed before it even starts.
-        try? FileManager.default.removeItem(at: bundle.failureURL)
-        // Same for a previous take's edit: it describes other footage, and the
-        // editor would load it instead of building one for this take.
-        try? FileManager.default.removeItem(at: bundle.url.appendingPathComponent("edl.json"))
         state = .recording
 
         cursorRecorder.start()
