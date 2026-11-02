@@ -48,6 +48,13 @@ fi
 if [ -z "${ALLOW_LOCKED:-}" ] && [ "$(ioreg -n Root -d1 | grep -o 'IOConsoleLocked" = [A-Za-z]*' | awk '{print $3}')" != "No" ]; then
   echo "Screen is locked — not starting the test." | tee "$OUT/summary.txt"; exit 4
 fi
+# The self-test reuses ~/Movies/BaseStudio/SelfTest/selftest-N; move any
+# earlier take aside first so a new run never overwrites a kept sample.
+ST=~/Movies/BaseStudio/SelfTest
+if [ -n "$(ls -A "$ST" 2>/dev/null)" ]; then
+  KEEP=~/Movies/BaseStudio/kept/selftest-before-$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$KEEP" && mv "$ST"/* "$KEEP"/ && echo "moved earlier self-test takes to $KEEP"
+fi
 START_DAY=$(date -u +%Y%m%d)
 caffeinate -d -u -t 2400 >/dev/null 2>&1 & CAF=$!
 open -n --stdout "$OUT/stdout.log" --stderr "$OUT/stderr.log" ${BS_ENV:+--env "$BS_ENV"} "$APP" --args "$@" --selftest-out "$REPORT"
