@@ -48,6 +48,7 @@ fi
 if [ -z "${ALLOW_LOCKED:-}" ] && [ "$(ioreg -n Root -d1 | grep -o 'IOConsoleLocked" = [A-Za-z]*' | awk '{print $3}')" != "No" ]; then
   echo "Screen is locked — not starting the test." | tee "$OUT/summary.txt"; exit 4
 fi
+START_DAY=$(date -u +%Y%m%d)
 caffeinate -d -u -t 2400 >/dev/null 2>&1 & CAF=$!
 open -n --stdout "$OUT/stdout.log" --stderr "$OUT/stderr.log" ${BS_ENV:+--env "$BS_ENV"} "$APP" --args "$@" --selftest-out "$REPORT"
 sleep 5
@@ -55,6 +56,8 @@ PID=$(pgrep -f "Base Studio.app/Contents/MacOS/BaseStudio" | head -1)
 [ -z "$PID" ] && { echo "app did not start"; kill $CAF; exit 2; }
 monitor "$PID" "$CAP_MB" "$MEM"
 kill $CAF 2>/dev/null
-cp ~/Library/Logs/BaseStudio/base-studio-$(date -u +%Y%m%d).log "$OUT/app.log" 2>/dev/null
+# The app logs to one file per UTC day; a run across midnight spans two.
+END_DAY=$(date -u +%Y%m%d); LOGS=~/Library/Logs/BaseStudio
+{ cat "$LOGS/base-studio-$START_DAY.log"; [ "$END_DAY" != "$START_DAY" ] && cat "$LOGS/base-studio-$END_DAY.log"; } > "$OUT/app.log" 2>/dev/null
 PEAK=$(awk -F, 'NR>1{if($2>m)m=$2} END{print m+0}' "$MEM")
 echo "$STATUS; peak ${PEAK} MB; report: $([ -s "$REPORT" ] && echo yes || echo no)" | tee "$OUT/summary.txt"
