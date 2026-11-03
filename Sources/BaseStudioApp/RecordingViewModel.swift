@@ -96,6 +96,9 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     // notch/menu extras; the floating panel gives the user an obvious Stop
     // affordance while recording. Users can still toggle it off per session.
     @Published var showFloatingPanel: Bool = true
+    /// Self-view bubble while recording. Separate from `includeWebcam`:
+    /// hiding the preview never stops the webcam recording.
+    @Published var showCameraWhileRecording: Bool = true
     @Published var editorState: EditorState?
     @Published var library: [RecordingsLibrary.Entry] = []
     @Published var displays: [DisplayInfo] = []
@@ -166,6 +169,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     private let menuBar = MenuBarController()
     private let countdown = CountdownOverlay()
     private let recordingPanel = RecordingPanel()
+    private let cameraBubble = CameraBubble()
     private var hiddenWindow: NSWindow?
 
     init() {
@@ -376,20 +380,23 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         // the menu-bar status item is hidden behind macOS menu extras.
         if showFloatingPanel {
             recordingPanel.onStop = { [weak self] in self?.stopRecording() }
-            let webcamSession = (includeWebcam && webcamPreview?.isRunning == true)
-                ? webcamPreview?.session : nil
-            recordingPanel.show(
-                webcamSession: webcamSession,
-                levels: session.levels
-            )
+            // No camera in the dock: the home preview was just stopped to
+            // free the camera; the self-view comes from the recorder below.
+            recordingPanel.show(webcamSession: nil, levels: session.levels)
         }
 
         Task { [weak self] in
             do {
                 let dir = try Self.recordingsDirectory()
                 _ = try await session.start(in: dir)
+                await MainActor.run {
+                    guard let self, self.phase == .recording, self.showCameraWhileRecording,
+                          let cam = session.webcamCaptureSession else { return }
+                    self.cameraBubble.show(session: cam)
+                }
             } catch {
                 await MainActor.run {
+                    self?.cameraBubble.hide()
                     self?.recordingPanel.hide()
                     self?.menuBar.hide()
                     self?.restoreWindow()
@@ -410,6 +417,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             return
         }
         phase = .finalizing
+        cameraBubble.hide()
         recordingPanel.hide()
         menuBar.hide()
         Task { [weak self] in

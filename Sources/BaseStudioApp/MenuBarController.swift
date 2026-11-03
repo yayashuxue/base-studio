@@ -1,4 +1,5 @@
 import AppKit
+import BaseStudioCore
 import Foundation
 
 /// Persistent Base Studio item in the system menu bar.
@@ -53,7 +54,9 @@ final class MenuBarController {
             button.contentTintColor = .systemRed
             button.font = .menuBarFont(ofSize: 0)
             button.title = " 0:00  Stop "
-            button.toolTip = "Click to stop recording  (⌘⇧.)"
+            // Only advertise the shortcut when it can actually fire.
+            button.toolTip = Self.globalHotkeyAvailable
+                ? "Click to stop recording  (⌘⇧.)" : "Click to stop recording"
         }
 
         elapsedTimer?.invalidate()
@@ -89,12 +92,23 @@ final class MenuBarController {
 
     // MARK: - hotkey ⌘⇧.
 
+    /// A global keyDown monitor only receives events with Accessibility
+    /// access; without it ⌘⇧. in another app does nothing, silently, while
+    /// the user believes recording stopped. So without access the global
+    /// shortcut is not installed and not advertised (task #17 covers asking
+    /// for the permission).
+    static var globalHotkeyAvailable: Bool { AXIsProcessTrusted() }
+
     private func installHotkey() {
         let mask: NSEvent.ModifierFlags = [.command, .shift]
-        hotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == mask,
-                  event.charactersIgnoringModifiers == "." else { return }
-            Task { @MainActor in self?.onStop?() }
+        if Self.globalHotkeyAvailable {
+            hotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == mask,
+                      event.charactersIgnoringModifiers == "." else { return }
+                Task { @MainActor in self?.onStop?() }
+            }
+        } else {
+            BSLog.info("no Accessibility access — global ⌘⇧. stop shortcut not installed")
         }
         localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == mask,

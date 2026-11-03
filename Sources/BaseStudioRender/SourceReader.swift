@@ -54,13 +54,17 @@ public final class SequentialSourceReader {
     }
 
     public func nextFrame() -> Frame? {
-        guard let output, let reader, reader.status == .reading,
-              let sb = output.copyNextSampleBuffer() else { return nil }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        if firstPTS == .zero { firstPTS = pts }
-        guard let pb = CMSampleBufferGetImageBuffer(sb) else { return nil }
-        let image = CIImage(cvPixelBuffer: pb)
-        return Frame(image: image, pts: pts)
+        guard let output, let reader else { return nil }
+        // A sample without a picture is not the end of the stream: gaps in a
+        // recovered (stitched) screen.mov surface as marker buffers. Treating
+        // one as EOF made export stop at the first gap (0.18 s of a 30 s take).
+        while reader.status == .reading, let sb = output.copyNextSampleBuffer() {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+            guard let pb = CMSampleBufferGetImageBuffer(sb) else { continue }
+            if firstPTS == .zero { firstPTS = pts }
+            return Frame(image: CIImage(cvPixelBuffer: pb), pts: pts)
+        }
+        return nil
     }
 }
 
