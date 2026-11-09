@@ -409,6 +409,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             switch action {
             case .stop, .stopLegacy: self?.stopRecording()
             case .retake: self?.retakeRecording()
+            case .pause: self?.togglePause()
             }
         }
         let keys = hotKeys.register()
@@ -423,8 +424,11 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         // notch, so with no bar there was no visible way to stop (julie, 11/8).
         recordingPanel.onStop = { [weak self] in self?.stopRecording() }
         recordingPanel.onRetake = { [weak self] in self?.retakeRecording() }
+        recordingPanel.onPauseToggle = { [weak self] in self?.togglePause() }
         recordingPanel.show(levels: session.levels, stopKey: stopKey,
-                            restartKey: keys.contains(.retake) ? "⌥⇧R" : nil)
+                            restartKey: keys.contains(.retake) ? "⌥⇧R" : nil,
+                            pauseKey: keys.contains(.pause) ? "⌥⇧P" : nil,
+                            cameraOn: includeWebcam, micOn: includeMic)
 
         Task { [weak self] in
             do {
@@ -502,6 +506,18 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         cameraBubble.hide()
         recordingPanel.hide()
         menuBar.hide()
+    }
+
+    /// Pause / resume. While paused nothing is written (see PauseState);
+    /// camera and mic stay open for a quick resume, and the bar says so.
+    /// Ignored until capture is up.
+    func togglePause() {
+        guard #available(macOS 13.0, *), phase == .recording, startGate.started,
+              let session = session as? RecordingSession else { return }
+        if session.isPaused { session.resume() } else { session.pause() }
+        recordingPanel.setPaused(session.isPaused)
+        menuBar.setPaused(session.isPaused)
+        BSLog.info(session.isPaused ? "paused" : "resumed")
     }
 
     /// Restart: confirm, finish this take, move it to the Trash (recoverable,

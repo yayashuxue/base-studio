@@ -21,6 +21,8 @@ public final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     }
 
     private let queue = DispatchQueue(label: "BaseStudio.Mic")
+    /// While paused, buffers are dropped (not written).
+    public var pauseState: PauseState?
     private var session: AVCaptureSession?
     private var output: AVCaptureAudioDataOutput?
     private var writer: AVAssetWriter?
@@ -177,6 +179,7 @@ public final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     ) {
         guard sampleBuffer.isValid, let audioInput, audioInput.isReadyForMoreMediaData else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if let pauseState, pauseState.covers(pts) { return }
         if firstPTS == nil {
             firstPTS = pts
             writer?.startSession(atSourceTime: pts)

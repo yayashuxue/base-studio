@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 
 /// On-disk layout of a recording. The PRD calls for a `.basestudio` directory bundle
@@ -101,6 +102,10 @@ public struct RecordingMetadata: Codable {
     /// itself, not `pointScale`: takes recorded at 1× on a 2× Retina display
     /// (1512 px wide, 1512 pt) stored pointScale 2, which put the cursor
     /// at twice its position — off the frame, so it never showed.
+    /// Host-clock intervals during which the take was paused: nothing was
+    /// recorded there. Optional for older bundles.
+    public var pauses: [PauseInterval]?
+
     public var pixelsPerPoint: Double {
         displayWidthPt > 0 ? Double(widthPx) / displayWidthPt : pointScale
     }
@@ -114,7 +119,8 @@ public struct RecordingMetadata: Codable {
         firstVideoPTS: TimePoint,
         lastVideoPTS: TimePoint,
         sources: [String: SourceMediaInfo]? = nil,
-        micFirstPTS: TimePoint? = nil
+        micFirstPTS: TimePoint? = nil,
+        pauses: [PauseInterval]? = nil
     ) {
         self.displayID = displayID
         self.widthPx = widthPx
@@ -128,12 +134,13 @@ public struct RecordingMetadata: Codable {
         self.lastVideoPTS = lastVideoPTS
         self.sources = sources
         self.micFirstPTS = micFirstPTS
+        self.pauses = pauses
     }
 
     private enum CodingKeys: String, CodingKey {
         case displayID, widthPx, heightPx, pointScale
         case displayOriginXPt, displayOriginYPt, displayWidthPt, displayHeightPt
-        case firstVideoPTS, lastVideoPTS, sources, micFirstPTS
+        case firstVideoPTS, lastVideoPTS, sources, micFirstPTS, pauses
     }
 
     public init(from decoder: Decoder) throws {
@@ -150,5 +157,21 @@ public struct RecordingMetadata: Codable {
         lastVideoPTS = try c.decode(TimePoint.self, forKey: .lastVideoPTS)
         sources = try? c.decode([String: SourceMediaInfo].self, forKey: .sources)
         micFirstPTS = try? c.decode(TimePoint.self, forKey: .micFirstPTS)
+        pauses = try? c.decode([PauseInterval].self, forKey: .pauses)
     }
+
+    /// Pauses as cuts in seconds from the screen's first frame.
+    public var pauseCuts: [SourceCut] {
+        let origin = firstVideoPTS.cmTime
+        return (pauses ?? []).map {
+            SourceCut(startSec: CMTimeSubtract($0.start.cmTime, origin).seconds,
+                      endSec: CMTimeSubtract($0.end.cmTime, origin).seconds)
+        }
+    }
+}
+
+public struct PauseInterval: Codable, Sendable, Equatable {
+    public var start: TimePoint
+    public var end: TimePoint
+    public init(start: TimePoint, end: TimePoint) { self.start = start; self.end = end }
 }

@@ -82,9 +82,20 @@ public final class RecordingSession {
         )
         self.cursorRecorder = CursorRecorder(sampleHz: options.cursorSampleHz)
         self.micRecorder = MicRecorder(levels: levels)
+        screenRecorder.pauseState = pauseState
+        webcamRecorder.pauseState = pauseState
+        micRecorder.pauseState = pauseState
+        cursorRecorder.pauseState = pauseState
         // Reassign with the shared instance so audioLevels reads from the same one.
         // (audioLevels is `let`; we pass `levels` to the recorders directly.)
     }
+
+    /// Pause: every recorder drops its samples until resume — nothing from
+    /// the paused stretch is written. Devices stay open for a quick resume.
+    private let pauseState = PauseState()
+    public var isPaused: Bool { pauseState.isPaused }
+    public func pause() { if state == .recording { pauseState.pause() } }
+    public func resume() { pauseState.resume() }
 
     /// Screen capture ended without `stop()` (e.g. macOS "Stop Sharing").
     /// Called on a background queue; the owner should call `stop()`.
@@ -199,6 +210,10 @@ public final class RecordingSession {
         // common "crashed halfway through" path.
         guard state == .recording else { throw RecordingSessionError.notRunning }
         state = .finalizing
+        // Close a pause still open at Stop; the intervals go into metadata.
+        let pauses = pauseState.finish().map {
+            PauseInterval(start: TimePoint($0.start), end: TimePoint($0.end))
+        }
         defer { state = .idle }
         guard let bundle else { throw RecordingSessionError.missingBundle }
 
@@ -286,7 +301,8 @@ public final class RecordingSession {
             firstVideoPTS: TimePoint(screenResult.firstPTS),
             lastVideoPTS: TimePoint(screenResult.lastPTS),
             sources: sourceInfo,
-            micFirstPTS: micFirstPTS
+            micFirstPTS: micFirstPTS,
+            pauses: pauses.isEmpty ? nil : pauses
         )
         let metaData = try JSONEncoder.pretty.encode(meta)
         try metaData.write(to: bundle.metadataURL, options: .atomic)

@@ -45,6 +45,8 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
     /// The running capture session, for a live self-view preview layer.
     /// Same session as the recording, so the camera is opened only once.
     public var captureSession: AVCaptureSession? { session }
+    /// While paused, frames are dropped (not written).
+    public var pauseState: PauseState?
 
     /// Open the camera without recording: frames flow (so `captureSession`
     /// can drive a live self-view during the countdown) but nothing is
@@ -199,6 +201,7 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
     ) {
         guard sampleBuffer.isValid, let videoInput, videoInput.isReadyForMoreMediaData else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if let pauseState, pauseState.covers(pts) { return }
         if firstPTS == nil {
             firstPTS = pts
             writer?.startSession(atSourceTime: pts)

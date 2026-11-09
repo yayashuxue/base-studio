@@ -84,6 +84,16 @@ enum SelfTest {
         func stop() { timer?.invalidate(); window?.orderOut(nil); window = nil }
     }
 
+    /// `--selftest-pause A B`: pause A s into the take for B s. Checks that
+    /// nothing was written while paused and the export is B s shorter.
+    private static var pausePlan: (at: Double, length: Double)? {
+        guard let i = CommandLine.arguments.firstIndex(of: "--selftest-pause"),
+              i + 2 < CommandLine.arguments.count,
+              let a = Double(CommandLine.arguments[i + 1]), let b = Double(CommandLine.arguments[i + 2])
+        else { return nil }
+        return (a, b)
+    }
+
     private static var recordSeconds: Double {
         if let i = CommandLine.arguments.firstIndex(of: "--selftest-seconds"),
            i + 1 < CommandLine.arguments.count, let v = Double(CommandLine.arguments[i + 1]) {
@@ -193,7 +203,15 @@ enum SelfTest {
             if CommandLine.arguments.contains("--selftest-camera-bubble"), let cam = session.webcamCaptureSession {
                 bubble.show(session: cam)
             }
-            try await Task.sleep(nanoseconds: UInt64(recordSeconds * 1_000_000_000))
+            if let plan = pausePlan, plan.at + plan.length < recordSeconds {
+                try await Task.sleep(nanoseconds: UInt64(plan.at * 1_000_000_000))
+                session.pause()
+                try await Task.sleep(nanoseconds: UInt64(plan.length * 1_000_000_000))
+                session.resume()
+                try await Task.sleep(nanoseconds: UInt64((recordSeconds - plan.at - plan.length) * 1_000_000_000))
+            } else {
+                try await Task.sleep(nanoseconds: UInt64(recordSeconds * 1_000_000_000))
+            }
             bubble.hide()
             _ = try await session.stop()
             lastBundle = bundle
@@ -246,7 +264,17 @@ enum SelfTest {
                 } catch {
                     r.exportError = "\(error)"
                 }
-                r.pass = r.pass && r.exportSec > max(1.0, recordSeconds - 1.5) && r.exportSec < recordSeconds + 3
+                let expected = recordSeconds - (pausePlan?.length ?? 0)
+                r.pass = r.pass && r.exportSec > max(1.0, expected - 1.5) && r.exportSec < expected + 3
+            }
+            if pausePlan != nil {
+                // Nothing written while paused: no screen frame inside the pause.
+                let meta = try? JSONDecoder().decode(RecordingMetadata.self, from: Data(contentsOf: bundle.metadataURL))
+                r.pauses = meta?.pauses?.count ?? 0
+                if let meta, let cut = meta.pauseCuts.first {
+                    r.framesInPause = await Self.framesBetween(bundle.screenURL, cut.startSec + 0.05, cut.endSec - 0.05)
+                }
+                r.pass = r.pass && r.pauses == 1 && r.framesInPause == 0
             }
             report.runs.append(r)
         }
@@ -283,6 +311,22 @@ enum SelfTest {
         guard !tracks.isEmpty else { return false }
         let dur = (try? await asset.load(.duration).seconds) ?? 0
         return dur > 1.0
+    }
+
+    /// Video samples of `url` (file time) between a and b seconds.
+    static func framesBetween(_ url: URL, _ a: Double, _ b: Double) async -> Int {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let reader = try? AVAssetReader(asset: asset) else { return -1 }
+        let out = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        reader.add(out)
+        reader.startReading()
+        var n = 0
+        while let sb = out.copyNextSampleBuffer() {
+            let t = CMSampleBufferGetPresentationTimeStamp(sb).seconds
+            if t > a && t < b && CMSampleBufferGetNumSamples(sb) > 0 { n += 1 }
+        }
+        return n
     }
 
     private static func recordingsDir() throws -> URL {
@@ -542,6 +586,8 @@ enum SelfTest {
         var screenDurationSec: Double = 0
         var recordSeconds: Double = 0
         var exportSec: Double = 0
+        var pauses = 0
+        var framesInPause = -1
         var exportError: String?
         var webcamTrack = false
         var micTrack = false

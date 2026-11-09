@@ -9,6 +9,8 @@ final class MenuBarController {
     private var statusItem: NSStatusItem?
     private var elapsedTimer: Timer?
     private var startedAt: Date?
+    private var pausedSince: Date?
+    private var pausedTotal: TimeInterval = 0
 
     var onStop: (() -> Void)?
     var onShowApp: (() -> Void)?
@@ -38,6 +40,7 @@ final class MenuBarController {
 
     func show() {
         startedAt = Date()
+        pausedSince = nil; pausedTotal = 0
 
         let item = ensureStatusItem()
         if let button = item.button {
@@ -72,10 +75,17 @@ final class MenuBarController {
         return item
     }
 
+    func setPaused(_ paused: Bool) {
+        if paused, pausedSince == nil { pausedSince = Date() }
+        else if !paused, let s = pausedSince { pausedTotal += Date().timeIntervalSince(s); pausedSince = nil }
+        tickTitle()
+    }
+
     private func tickTitle() {
         guard let startedAt, let button = statusItem?.button else { return }
-        let elapsed = BS.Format.mmss(Date().timeIntervalSince(startedAt))
-        button.title = " \(elapsed)  Stop "
+        let pausedNow = pausedSince.map { Date().timeIntervalSince($0) } ?? 0
+        let elapsed = BS.Format.mmss(Date().timeIntervalSince(startedAt) - pausedTotal - pausedNow)
+        button.title = pausedSince == nil ? " \(elapsed)  Stop " : " \(elapsed)  Paused · Stop "
     }
 
     @objc private func itemAction(_ sender: Any?) {

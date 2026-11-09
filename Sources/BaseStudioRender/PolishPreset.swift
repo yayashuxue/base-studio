@@ -159,7 +159,8 @@ public enum PolishPreset {
             nodeGraph: NodeGraph(nodes: nodes),
             canvas: canvas,
             timelineDuration: timelineDuration,
-            zoomRegions: zoomRegions
+            zoomRegions: zoomRegions,
+            cuts: meta.pauseCuts
         )
     }
 

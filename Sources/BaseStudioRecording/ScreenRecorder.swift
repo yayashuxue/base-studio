@@ -228,6 +228,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     public var sharedLevels: AudioLevels? { levels }
     /// Called on an SCK queue when capture ends without stop() being called.
     public var onCaptureEnded: (@Sendable (Error) -> Void)?
+    /// While paused, screen and system-audio samples are dropped (not written).
+    public var pauseState: PauseState?
 
     public init(
         captureSystemAudio: Bool = true,
@@ -908,6 +910,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             _activity.lastAudio = now; _activity.audioCallbacks += 1
         }
         activityLock.unlock()
+        if let pauseState, pauseState.covers(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) { return }
         if type == .screen {
             if let quiet = injectSilenceAfter, let origin = firstPTS,
                CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), origin).seconds > quiet {

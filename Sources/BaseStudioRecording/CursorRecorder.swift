@@ -33,6 +33,8 @@ public final class CursorRecorder: @unchecked Sendable {
 
     private let sampleHz: Int
     private let queue = DispatchQueue(label: "BaseStudio.Cursor")
+    /// While paused, positions and clicks are not recorded.
+    public var pauseState: PauseState?
     private var timer: DispatchSourceTimer?
     private var clickMonitor: Any?
     private var samples: [Sample] = []
@@ -96,12 +98,14 @@ public final class CursorRecorder: @unchecked Sendable {
         // flip Y here at capture time.
         guard let loc = CGEvent(source: nil)?.location else { return }
         let pt = HostClock.now()
+        if let pauseState, pauseState.covers(pt) { return }
         let yNS = Double(cgFlipY) - Double(loc.y)
         samples.append(Sample(t: TimePoint(pt), x: Double(loc.x), y: yNS))
     }
 
     private func handleClick(_ e: NSEvent) {
         let pt = HostClock.now()
+        if let pauseState, pauseState.covers(pt) { return }
         let loc = NSEvent.mouseLocation
         let isLeft = (e.type == .leftMouseDown || e.type == .leftMouseUp)
         let isDown = (e.type == .leftMouseDown || e.type == .rightMouseDown)

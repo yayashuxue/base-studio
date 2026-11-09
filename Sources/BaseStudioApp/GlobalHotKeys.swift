@@ -8,14 +8,14 @@ import Carbon.HIToolbox
 /// nothing; the user believed the recording had stopped).
 @MainActor
 final class GlobalHotKeys {
-    enum Action: UInt32 { case stop = 1, stopLegacy, retake }
+    enum Action: UInt32 { case stop = 1, stopLegacy, retake, pause }
 
     /// (action, key code, modifiers). ⌥⇧ like Loom; ⌘⇧. kept for stop.
-    /// (⌥⇧P joins with true pause — never register a key that does nothing.)
     static let bindings: [(Action, Int, Int)] = [
         (.stop, kVK_ANSI_S, optionKey | shiftKey),
         (.stopLegacy, kVK_ANSI_Period, cmdKey | shiftKey),
         (.retake, kVK_ANSI_R, optionKey | shiftKey),
+        (.pause, kVK_ANSI_P, optionKey | shiftKey),
     ]
 
     var onAction: ((Action) -> Void)?

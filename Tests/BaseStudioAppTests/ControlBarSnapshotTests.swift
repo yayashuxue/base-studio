@@ -14,13 +14,16 @@ final class ControlBarSnapshotTests: XCTestCase {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let bar = RecordingPanel()
-        bar.show()
+        bar.show(levels: nil, stopKey: "⌥⇧S", restartKey: "⌥⇧R", pauseKey: "⌥⇧P", cameraOn: true, micOn: true)
         let bubble = CameraBubble()
         bubble.show(session: AVCaptureSession())
         defer { bar.hide(); bubble.hide() }
         try await Task.sleep(nanoseconds: 800_000_000)
         try snapshot(XCTUnwrap(bar.panel), to: "/tmp/control-bar.png")
         try snapshot(XCTUnwrap(bubble.panel), to: "/tmp/camera-bubble.png")
+        bar.setPaused(true)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        try snapshot(XCTUnwrap(bar.panel), to: "/tmp/control-bar-paused.png")
     }
 
     /// Window + its shadow, composited over white.

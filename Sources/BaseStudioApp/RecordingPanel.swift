@@ -23,21 +23,34 @@ final class RecordingPanel {
     private weak var audioLevels: AudioLevels?
     private var micMeterLayer: CALayer?
     private var sysMeterLayer: CALayer?
+    private var metersHost: NSView?
+    private var pausedRow: NSView?
+    private var pauseButton: CircleIconButton?
+    private var dotLayer: CAShapeLayer?
+    private var pausedSince: Date?
+    private var pausedTotal: TimeInterval = 0
+    private var pauseKey: String?
 
     var onStop: (() -> Void)?
     var onRetake: (() -> Void)?
+    var onPauseToggle: (() -> Void)?
 
     private static let width: CGFloat = 56
     private static let originKey = "RecordingControlBar.origin"
     private static let meterW: CGFloat = 32
 
-    /// `stopKey` / `restartKey`: shortcut text to show, only if registered.
-    func show(levels: AudioLevels? = nil, stopKey: String? = nil, restartKey: String? = nil) {
+    /// `stopKey` / `restartKey` / `pauseKey`: shortcut text to show, only if
+    /// registered. `cameraOn` / `micOn`: devices that stay open while paused,
+    /// shown honestly in the paused state.
+    func show(levels: AudioLevels? = nil, stopKey: String? = nil, restartKey: String? = nil,
+              pauseKey: String? = nil, cameraOn: Bool = false, micOn: Bool = false) {
         self.audioLevels = levels
+        self.pauseKey = pauseKey
         guard panel == nil else { return }
+        pausedSince = nil; pausedTotal = 0
 
         let w = Self.width
-        let h: CGFloat = 12 + 10 + 6 + 16 + 10 + 8 + 14 + 32 + 8 + 36 + 12
+        let h: CGFloat = 12 + 10 + 6 + 16 + 10 + 14 + 12 + 32 + 8 + 32 + 8 + 36 + 12
         let size = NSSize(width: w, height: h)
 
         let panel = NSPanel(
@@ -77,15 +90,10 @@ final class RecordingPanel {
         dot.shadowOpacity = 1
         dot.shadowRadius = 5
         dot.shadowOffset = .zero
-        let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 1.0
-        pulse.toValue = 0.45
-        pulse.duration = 0.7
-        pulse.autoreverses = true
-        pulse.repeatCount = .infinity
-        dot.add(pulse, forKey: "pulse")
+        dot.add(Self.pulse, forKey: "pulse")
         dotHost.layer?.addSublayer(dot)
         bg.addSubview(dotHost)
+        self.dotLayer = dot
 
         // Timer.
         y -= 6 + 16
@@ -97,10 +105,28 @@ final class RecordingPanel {
         bg.addSubview(label)
         self.elapsedLabel = label
 
-        // Mic (top) + system audio meters.
-        y -= 10 + 8
+        // Mic (top) + system audio meters; while paused this row shows which
+        // devices are still open instead.
+        y -= 10 + 14
+        let paused = NSStackView()
+        paused.orientation = .horizontal
+        paused.spacing = 5
+        for (on, symbol) in [(cameraOn, "video.fill"), (micOn, "mic.fill")] where on {
+            let iv = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))!)
+            iv.contentTintColor = NSColor.systemOrange
+            paused.addArrangedSubview(iv)
+        }
+        paused.alignment = .centerY
+        let fit = paused.fittingSize
+        paused.frame = NSRect(x: (w - fit.width) / 2, y: y, width: fit.width, height: 14)
+        paused.toolTip = cameraOn || micOn
+            ? "Paused — nothing is being recorded. Camera and microphone stay on." : "Paused — nothing is being recorded."
+        paused.isHidden = true
+        bg.addSubview(paused)
+        self.pausedRow = paused
         if levels != nil {
-            let host = NSView(frame: NSRect(x: (w - Self.meterW) / 2, y: y, width: Self.meterW, height: 8))
+            let host = NSView(frame: NSRect(x: (w - Self.meterW) / 2, y: y + 3, width: Self.meterW, height: 8))
             host.wantsLayer = true
             for (row, color) in [(5, DockPaint.meterMic), (0, DockPaint.meterSystem)] {
                 let track = CALayer()
@@ -116,10 +142,24 @@ final class RecordingPanel {
                 if row == 5 { micMeterLayer = fill } else { sysMeterLayer = fill }
             }
             bg.addSubview(host)
+            self.metersHost = host
         }
 
+        // Pause / Resume.
+        y -= 12 + 32
+        let pause = CircleIconButton(
+            frame: NSRect(x: (w - 32) / 2, y: y, width: 32, height: 32),
+            symbol: "pause.fill", fill: NSColor.white.withAlphaComponent(0.14),
+            hover: NSColor.white.withAlphaComponent(0.24)
+        )
+        pause.toolTip = pauseKey.map { "Pause  (\($0))" } ?? "Pause"
+        pause.target = self
+        pause.action = #selector(pauseAction)
+        bg.addSubview(pause)
+        self.pauseButton = pause
+
         // Restart.
-        y -= 14 + 32
+        y -= 8 + 32
         let retake = CircleIconButton(
             frame: NSRect(x: (w - 32) / 2, y: y, width: 32, height: 32),
             symbol: "arrow.counterclockwise", fill: NSColor.white.withAlphaComponent(0.14),
@@ -160,6 +200,46 @@ final class RecordingPanel {
         panel?.orderOut(nil); panel = nil
         elapsedLabel = nil; startedAt = nil
         micMeterLayer = nil; sysMeterLayer = nil
+        metersHost = nil; pausedRow = nil; pauseButton = nil; dotLayer = nil
+        pausedSince = nil; pausedTotal = 0
+    }
+
+    /// Paused: timer stops, dot goes amber and still, the meters give way to
+    /// the devices that remain open, the button becomes Resume.
+    func setPaused(_ paused: Bool) {
+        if paused, pausedSince == nil {
+            pausedSince = Date()
+        } else if !paused, let since = pausedSince {
+            pausedTotal += Date().timeIntervalSince(since)
+            pausedSince = nil
+        }
+        metersHost?.isHidden = paused
+        pausedRow?.isHidden = !paused
+        elapsedLabel?.textColor = paused ? .systemOrange : .white
+        if let dot = dotLayer {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            dot.fillColor = (paused ? NSColor.systemOrange : DockPaint.recordingRed).cgColor
+            dot.shadowOpacity = paused ? 0 : 1
+            if paused { dot.removeAnimation(forKey: "pulse") } else { dot.add(Self.pulse, forKey: "pulse") }
+            CATransaction.commit()
+        }
+        if let b = pauseButton {
+            b.symbol = paused ? "play.fill" : "pause.fill"
+            let verb = paused ? "Resume" : "Pause"
+            b.toolTip = pauseKey.map { "\(verb)  (\($0))" } ?? verb
+        }
+        tick()
+    }
+
+    private static var pulse: CABasicAnimation {
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = 1.0
+        a.toValue = 0.45
+        a.duration = 0.7
+        a.autoreverses = true
+        a.repeatCount = .infinity
+        return a
     }
 
     private static func pillMask(radius: CGFloat) -> NSImage {
@@ -188,7 +268,8 @@ final class RecordingPanel {
 
     private func tick() {
         guard let s = startedAt, let label = elapsedLabel else { return }
-        label.stringValue = BS.Format.mmss(Date().timeIntervalSince(s))
+        let pausedNow = pausedSince.map { Date().timeIntervalSince($0) } ?? 0
+        label.stringValue = BS.Format.mmss(Date().timeIntervalSince(s) - pausedTotal - pausedNow)
         guard let levels = audioLevels else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -203,15 +284,16 @@ final class RecordingPanel {
 
     @objc private func stopAction() { onStop?() }
     @objc private func retakeAction() { onRetake?() }
+    @objc private func pauseAction() { onPauseToggle?() }
 }
 
 // MARK: - Round icon button
 
 /// Flat round button with an SF Symbol; hover brightens the fill.
-private final class CircleIconButton: NSButton {
+final class CircleIconButton: NSButton {
     private let fill: NSColor
     private let hoverFill: NSColor
-    private let symbol: String
+    var symbol: String { didSet { needsDisplay = true } }
     private var isHover = false { didSet { needsDisplay = true } }
     private var trackingArea: NSTrackingArea?
 
