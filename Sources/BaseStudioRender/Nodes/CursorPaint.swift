@@ -72,8 +72,10 @@ public struct CursorPaint: VideoNode {
             by: CGAffineTransform(scaleX: 1.0 / pixelScale, y: 1.0 / pixelScale)
         )
         // Soft blur for a gradient halo edge.
-        let blurred = raw.applyingGaussianBlur(sigma: Double(radius) * 0.4)
-        let trimmed = blurred.cropped(to: raw.extent)
+        // Rasterized: a lazily-evaluated blur re-ran on every frame.
+        let trimmed = RasterCache.image("halo|\(key)") {
+            raw.applyingGaussianBlur(sigma: Double(radius) * 0.4).cropped(to: raw.extent)
+        }
         haloCache.setObject(trimmed, forKey: key)
         return trimmed
     }

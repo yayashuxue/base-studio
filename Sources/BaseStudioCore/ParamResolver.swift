@@ -76,8 +76,18 @@ public enum ParamResolver {
             let hi = CMTimeAdd(t, CMTimeMakeWithSeconds(+window, preferredTimescale: 600))
             let lo_s = lo.seconds, hi_s = hi.seconds
             var sx = 0.0, sy = 0.0, n = 0.0
-            for s in samples where s.pts.seconds >= lo_s && s.pts.seconds <= hi_s {
-                sx += s.x; sy += s.y; n += 1
+            // Samples are in time order: binary-search the window instead of
+            // scanning every sample (a 2-minute take has ~15k; this ran for
+            // each cursor-bound param on every frame).
+            var a = 0, b = samples.count
+            while a < b {
+                let m = (a + b) / 2
+                if samples[m].pts.seconds < lo_s { a = m + 1 } else { b = m }
+            }
+            var i = a
+            while i < samples.count, samples[i].pts.seconds <= hi_s {
+                sx += samples[i].x; sy += samples[i].y; n += 1
+                i += 1
             }
             if n > 0 {
                 return .point2(x: sx / n, y: sy / n)

@@ -28,11 +28,12 @@ final class RenderCostBreakdownProbeTests: XCTestCase {
             for i in 0..<20 {
                 let pts = CMTime(seconds: 20 + Double(i) / 30, preferredTimescale: 600)
                 let t0 = CFAbsoluteTimeGetCurrent()
-                let img = Renderer.render(.init(project: project, pts: pts, sourceTime: pts,
+                var inp = Renderer.Inputs(project: project, pts: pts, sourceTime: pts,
                     sidecarOffset: editor.primarySource.fileTime(at: segIn), primarySource: editor.primarySource,
                     primaryFrame: screen, sidecars: editor.sidecars, quality: .standard, ciContext: ctx,
-                    backgroundImage: nil, frameProvider: { id, _ in id == SourceID.webcam ? cam : nil }))
-                    .transformed(by: CGAffineTransform(scaleX: 0.5, y: 0.5))
+                    backgroundImage: nil, frameProvider: { id, _ in id == SourceID.webcam ? cam : nil })
+                inp.renderScale = 0.5
+                let img = Renderer.render(inp)
                 ctx.render(img, to: pb!)
                 ms.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
             }

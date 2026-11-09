@@ -27,7 +27,7 @@ public enum PreviewPlayback {
 
     /// Picture at `scale` of the canvas (playback; scrubbing still renders full size).
     public static func makeItem(_ ctx: Context, bundleURL: URL, audio: [AudioMixer.Source],
-                                scale: Double = 0.5) async throws -> AVPlayerItem {
+                                scale: Double = 0.4) async throws -> AVPlayerItem {
         let comp = AVMutableComposition()
         let map = ctx.timeMap
         let segIn = ctx.project.videoTrack.segments.first?.sourceIn.cmTime ?? ctx.primary.firstPTS.cmTime
@@ -67,12 +67,19 @@ public enum PreviewPlayback {
         if let screenID = trackIDs[ctx.primary.id] {
             let vc = AVMutableVideoComposition()
             vc.customVideoCompositorClass = PreviewCompositor.self
-            vc.frameDuration = CMTime(value: 1, timescale: 30)
+            vc.frameDuration = CMTime(value: 1, timescale: 24)   // editor preview, like the old 24 fps knob
             vc.renderSize = CGSize(width: Double(ctx.project.canvas.widthPx) * scale,
                                    height: Double(ctx.project.canvas.heightPx) * scale)
             vc.instructions = [PreviewInstruction(
-                timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: map.timelineDurationSec, preferredTimescale: 600)),
+                // Must cover the composition exactly: AVPlayer silently draws
+                // nothing for an instruction that falls short of the duration
+                // (an asset reader is lenient), so use the composition's own.
+                timeRange: CMTimeRange(start: .zero, duration: comp.duration),
                 screenTrack: screenID, webcamTrack: trackIDs[SourceID.webcam], context: ctx, scale: scale)]
+            if (try? await vc.isValid(for: comp, timeRange: CMTimeRange(start: .zero, duration: comp.duration), validationDelegate: nil)) == false {
+                throw NSError(domain: "BaseStudio.Preview", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "preview video composition is invalid"])
+            }
             item.videoComposition = vc
         }
         return item
@@ -136,6 +143,14 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
     // Concurrent: the player asks for frames ahead; CIContext is thread-safe.
     private let queue = DispatchQueue(label: "BaseStudio.PreviewCompositor", qos: .userInteractive, attributes: .concurrent)
 
+    /// Probe only (BS_PREVIEW_TRIVIAL=1): pass the screen frame through.
+    static let trivial = ProcessInfo.processInfo.environment["BS_PREVIEW_TRIVIAL"] == "1"
+    /// Frames composed so far (probes/diagnostics).
+    nonisolated(unsafe) static var framesComposed = 0
+    nonisolated(unsafe) static var lastError: String?
+    nonisolated(unsafe) static var buildMs = 0.0
+    nonisolated(unsafe) static var drawMs = 0.0
+
     func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {}
 
     func startRequest(_ request: AVAsynchronousVideoCompositionRequest) {
@@ -144,6 +159,7 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
             // autoreleased (export once grew to 40 GB without one).
             guard let ins = request.videoCompositionInstruction as? PreviewInstruction,
                   let out = request.renderContext.newPixelBuffer() else {
+                PreviewCompositor.lastError = "no instruction or output buffer"
                 request.finish(with: NSError(domain: "BaseStudio.Preview", code: 1))
                 return
             }
@@ -153,11 +169,15 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
                 request.finish(withComposedVideoFrame: out)
                 return
             }
+            if PreviewCompositor.trivial {   // probe: pipeline + decode cost only
+                request.finish(withComposedVideoFrame: screenPB)
+                return
+            }
             let ctx = ins.context
             let pts = request.compositionTime
             let webcam = ins.webcamTrack.flatMap { request.sourceFrame(byTrackID: $0) }.map { CIImage(cvPixelBuffer: $0) }
             let segIn = ctx.project.videoTrack.segments.first?.sourceIn.cmTime ?? ctx.primary.firstPTS.cmTime
-            let inputs = Renderer.Inputs(
+            var inputs = Renderer.Inputs(
                 project: ctx.project, pts: pts,
                 sourceTime: CMTime(seconds: ctx.timeMap.sourceSec(at: pts.seconds), preferredTimescale: 6000),
                 sidecarOffset: ctx.primary.fileTime(at: segIn),
@@ -166,9 +186,14 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
                 backgroundImage: ctx.backgroundImage,
                 frameProvider: { id, _ in id == SourceID.webcam ? webcam : nil }
             )
+            inputs.renderScale = ins.scale     // compute at preview size, not full then shrink
+            let t0 = CFAbsoluteTimeGetCurrent()
             let image = Renderer.render(inputs)
-                .transformed(by: CGAffineTransform(scaleX: ins.scale, y: ins.scale))
+            let t1 = CFAbsoluteTimeGetCurrent()
             ciContext.render(image, to: out)
+            PreviewCompositor.buildMs += (t1 - t0) * 1000
+            PreviewCompositor.drawMs += (CFAbsoluteTimeGetCurrent() - t1) * 1000
+            PreviewCompositor.framesComposed += 1
             request.finish(withComposedVideoFrame: out)
         } }
     }
