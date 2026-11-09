@@ -380,8 +380,25 @@ final class EditorState: ObservableObject {
     func setPlayhead(_ sec: Double) {
         playheadSec = max(0, min(timelineDurationSec, sec))
         clock.seek(to: playheadSec)
+        // Scrubbing: draw quick, small frames while the playhead moves and a
+        // full-quality one once it rests (julie: dragging the bar lagged).
+        if !isPlaying {
+            stillScale = 0.4
+            settleTimer?.invalidate()
+            settleTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.stillScale = 1
+                    self.scheduleRender()
+                }
+            }
+        }
         scheduleRender()
     }
+
+    /// Render scale for the still preview: < 1 while scrubbing.
+    private var stillScale: Double = 1
+    private var settleTimer: Timer?
 
     // MARK: - playback
 
@@ -451,9 +468,10 @@ final class EditorState: ObservableObject {
         renderPending = false
         let snapshot = project
         let pts = playheadPTS
+        let scale = stillScale
         Task { [weak self] in
             guard let self else { return }
-            let image = await self.render(project: snapshot, at: pts)
+            let image = await self.renderInternal(project: snapshot, at: pts, scale: scale)
             await MainActor.run {
                 self.renderedImage = image
                 self.renderInFlight = false
@@ -464,11 +482,7 @@ final class EditorState: ObservableObject {
         }
     }
 
-    private nonisolated func render(project: Project, at pts: CMTime) async -> NSImage? {
-        await renderInternal(project: project, at: pts)
-    }
-
-    func renderInternal(project: Project, at pts: CMTime) async -> NSImage? {
+    func renderInternal(project: Project, at pts: CMTime, scale: Double = 1) async -> NSImage? {
         guard let primaryImg = await sourceFrameAsync(primarySource.id, timelinePTS: pts) else {
             return nil
         }
@@ -478,7 +492,7 @@ final class EditorState: ObservableObject {
             ?? primarySource.firstPTS.cmTime
         let sidecarOffset = primarySource.fileTime(at: segIn)
 
-        let inputs = Renderer.Inputs(
+        var inputs = Renderer.Inputs(
             project: project,
             pts: pts,
             sourceTime: sourceTime(at: pts),
@@ -494,9 +508,10 @@ final class EditorState: ObservableObject {
                 return self.syncSourceFrame(sourceID, timelinePTS: t)
             }
         )
+        inputs.renderScale = scale
         let output = Renderer.render(inputs)
-        let cw = project.canvas.widthPx
-        let ch = project.canvas.heightPx
+        let cw = Int((Double(project.canvas.widthPx) * scale).rounded())
+        let ch = Int((Double(project.canvas.heightPx) * scale).rounded())
         guard let cg = ciContext.createCGImage(
             output, from: CGRect(x: 0, y: 0, width: cw, height: ch)
         ) else { return nil }
