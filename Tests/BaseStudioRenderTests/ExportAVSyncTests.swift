@@ -15,7 +15,7 @@ final class ExportAVSyncTests: XCTestCase {
         .first { FileManager.default.isExecutableFile(atPath: $0) }
 
     private let hostFirstPTS = CMTime(value: 1_234_567_890, timescale: 600)
-    private let durationSec = 4.0
+    private var durationSec = 4.0
     private let w = 640, h = 360
 
     func testExportKeepsFlashAndClickTogether() async throws {
@@ -53,10 +53,46 @@ final class ExportAVSyncTests: XCTestCase {
         }
     }
 
+    /// A pause becomes a cut: the export skips it, later content moves up,
+    /// and picture and sound stay together across the join.
+    func testCutClosesUpAndKeepsSync() async throws {
+        guard let ffmpeg = Self.ffmpeg else { throw XCTSkip("ffmpeg not installed") }
+        durationSec = 6
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("bs-cut-\(UUID().uuidString)", isDirectory: true)
+        let bundle = tmp.appendingPathComponent("rec.basestudio", isDirectory: true)
+        try fm.createDirectory(at: bundle, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+        // Flash + click at 1, 2, 3, 4, 5 s.
+        try run(ffmpeg, ["-v", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=\(w)x\(h):r=30:d=\(durationSec)",
+            "-f", "lavfi", "-i", "aevalsrc='0.8*sin(2*PI*1000*t)*lt(mod(t\\,1)\\,0.02)*gte(t\\,0.5)':s=48000:d=\(durationSec)",
+            "-vf", "drawbox=c=white:t=fill:enable='lt(mod(t\\,1)\\,0.067)*gte(t\\,0.5)'",
+            "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30",
+            "-c:a", "aac", "-ac", "2", bundle.appendingPathComponent("screen.mov").path])
+        try writeMetadata(bundle.appendingPathComponent("metadata.json"))
+        let out = tmp.appendingPathComponent("out.mp4")
+        // Paused 2.5–3.5 s: the flash at 3 s was never recorded.
+        _ = try await ExportPipeline().run(.init(
+            project: makeProject(cuts: [SourceCut(startSec: 2.5, endSec: 3.5)]), bundleURL: bundle,
+            outputURL: out, fps: 30, bitrate: 4_000_000, audioMode: .systemOnly))
+
+        let dur = try await AVURLAsset(url: out).load(.duration).seconds
+        XCTAssertEqual(dur, 5, accuracy: 0.1, "cut should shorten 6 s to 5 s")
+        let p = try await pairs(ffmpeg, out, appleAudio: true)
+        XCTAssertEqual(p.map { ($0.flash * 10).rounded() / 10 }, [1, 2, 3, 4], "source 4 s and 5 s move up by 1 s: \(p)")
+        for x in p { XCTAssertEqual(x.offsetMs, 0, accuracy: 25, "audio off after the cut: \(p)") }
+    }
+
     // MARK: - measurement
 
     /// Click onset minus flash onset (ms) for each pair.
     private func offsets(_ ffmpeg: String, _ url: URL, appleAudio: Bool) async throws -> [Double] {
+        try await pairs(ffmpeg, url, appleAudio: appleAudio).map(\.offsetMs)
+    }
+
+    /// (flash time, click − flash in ms) for each flash with a click near it.
+    private func pairs(_ ffmpeg: String, _ url: URL, appleAudio: Bool) async throws -> [(flash: Double, offsetMs: Double)] {
         // Flash onsets: per-frame mean luma, rising edge over 128.
         let v = try run(ffmpeg, ["-v", "info", "-i", url.path, "-map", "0:v",
                                  "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG",
@@ -91,7 +127,7 @@ final class ExportAVSyncTests: XCTestCase {
             i += 48
         }
         return flashes.compactMap { f in
-            clicks.min(by: { abs($0 - f) < abs($1 - f) }).flatMap { abs($0 - f) < 0.5 ? ($0 - f) * 1000 : nil }
+            clicks.min(by: { abs($0 - f) < abs($1 - f) }).flatMap { abs($0 - f) < 0.5 ? (f, ($0 - f) * 1000) : nil }
         }
     }
 
@@ -139,7 +175,7 @@ final class ExportAVSyncTests: XCTestCase {
 
     // MARK: - fixture (same shape as ExportPipelineE2ETests)
 
-    private func makeProject() -> Project {
+    private func makeProject(cuts: [SourceCut] = []) -> Project {
         let firstPTS = TimePoint(hostFirstPTS)
         let lastPTS = TimePoint(CMTimeAdd(hostFirstPTS, CMTime(seconds: durationSec, preferredTimescale: 600)))
         let screen = SourceClip(id: SourceID.screen, relativeMediaPath: "screen.mov",
@@ -149,7 +185,8 @@ final class ExportAVSyncTests: XCTestCase {
         let bg = NodeInstance(instanceID: "bg_1", nodeType: BackgroundCompose.spec.id, bindings: [:], enabled: true)
         return Project(sources: [screen], videoTrack: VideoTrack(segments: [segment]),
                        nodeGraph: NodeGraph(nodes: [bg]), canvas: CanvasSpec(widthPx: 1280, heightPx: 720),
-                       timelineDuration: TimePoint(CMTime(seconds: durationSec, preferredTimescale: 600)))
+                       timelineDuration: TimePoint(CMTime(seconds: durationSec, preferredTimescale: 600)),
+                       cuts: cuts)
     }
 
     private func writeMetadata(_ url: URL) throws {

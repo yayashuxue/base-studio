@@ -456,6 +456,7 @@ final class EditorState: ObservableObject {
         let inputs = Renderer.Inputs(
             project: project,
             pts: pts,
+            sourceTime: sourceTime(at: pts),
             sidecarOffset: sidecarOffset,
             primarySource: primarySource,
             primaryFrame: primaryImg,
@@ -482,11 +483,17 @@ final class EditorState: ObservableObject {
     /// Resolve the on-disk file-time at which to seek `source` for a given
     /// timeline PTS. Primary honors trim + speed-ramps; secondary sources
     /// (e.g. webcam) share the host clock and only get the host→file shift.
-    private func seekTime(forSource source: SourceClip, timelinePTS: CMTime) -> CMTime {
-        let hostPTS = source.id == primarySource.id
-            ? primarySourcePTS(at: timelinePTS)
-            : CMTimeAdd(primarySource.firstPTS.cmTime, timelinePTS)
-        return source.fileTime(at: hostPTS)
+    /// Every source is read at the same host time, mapped through the
+    /// TimeMap (trim, cuts, speed) — as export does. The webcam used to be
+    /// read at first frame + timeline time, ignoring trim and cuts.
+    func seekTime(forSource source: SourceClip, timelinePTS: CMTime) -> CMTime {
+        source.fileTime(at: primarySourcePTS(at: timelinePTS))
+    }
+
+    /// Source time (seconds since trim-in) shown at timeline `pts`; cursor
+    /// streams and zoom regions are read at this time.
+    func sourceTime(at pts: CMTime) -> CMTime {
+        CMTime(seconds: timeMap.sourceSec(at: pts.seconds), preferredTimescale: 6000)
     }
 
     /// Resolve the seek target for `sourceID` and return a cache hit if we

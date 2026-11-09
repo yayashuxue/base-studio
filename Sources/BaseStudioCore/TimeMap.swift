@@ -133,10 +133,14 @@ public struct TimeMap: Sendable {
     public func sourceSec(at timelineSec: Double) -> Double {
         var elapsed: Double = 0
         let target = max(0, min(timelineDurationSec, timelineSec))
-        for seg in segments {
+        // A boundary belongs to the segment that starts there: right after a
+        // cut, timeline t maps to where recording resumed, not to the cut's
+        // start (which was never shown).
+        for (i, seg) in segments.enumerated() {
             let next = elapsed + seg.timelineDuration
-            if target <= next + 1e-9 {
-                let dt = target - elapsed
+            let isLast = i == segments.count - 1
+            if target < next - 1e-9 || (isLast && target <= next + 1e-9) {
+                let dt = max(0, target - elapsed)
                 return seg.sourceStart + dt * seg.speed
             }
             elapsed = next
