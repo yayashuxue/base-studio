@@ -51,7 +51,7 @@ public enum AudioMixer {
         into audioInput: AVAssetWriterInput,
         canceled: @escaping () -> Bool = { false }
     ) async throws {
-        if let map = timeMap, map.segments.contains(where: { abs($0.speed - 1.0) > 0.001 }) {
+        if let map = timeMap, !map.isIdentity {
             try await mixWithTimeMap(
                 sources, timeMap: map,
                 timelineDuration: timelineDuration,

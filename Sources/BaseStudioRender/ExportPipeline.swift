@@ -176,13 +176,16 @@ public final class ExportPipeline {
         let sourcesByID = input.project.sourcesByID
 
         var currentTimelinePTS = CMTime.zero
+        // Host-clock time of the frame being rendered — what other sources
+        // (webcam) are fetched at. Not timeline + origin: cuts and speed
+        // regions make the two differ.
+        var currentSourceHostPTS = originPTS
 
         let frameProvider: (String, CMTime) -> CIImage? = { [weak self] sourceID, _ in
             guard let self,
                   let r = randomReaders[sourceID],
                   let src = sourcesByID[sourceID] else { return nil }
-            let hostTarget = CMTimeAdd(currentTimelinePTS, originPTS)
-            return self.syncFetch(r, at: src.fileTime(at: hostTarget))
+            return self.syncFetch(r, at: src.fileTime(at: currentSourceHostPTS))
         }
 
         // Trim window: reader.pts is file-time, so compare in file-time.
@@ -197,18 +200,22 @@ public final class ExportPipeline {
         // Compute the time map honoring speed-bearing regions.
         let timeMap = input.project.timeMap(primaryFirstPTS: originPTS)
         let timelineDurationSec = timeMap.timelineDurationSec
-        let hasSpeedRemap = input.project.zoomRegions.contains { abs($0.speed - 1.0) > 0.001 }
+        let hasSpeedRemap = timeMap.segments.contains { abs($0.speed - 1.0) > 0.001 }
 
         var frameCount = 0
 
         if !hasSpeedRemap {
             // Fast path: sequential read of source frames; reader.pts is file-time.
+            // Frames inside a cut (pause) are skipped; the rest close up.
             while let frame = primaryReader.nextFrame() {
                 if isCanceled { throw ExportError.canceled }
                 if CMTimeCompare(frame.pts, segInFileTime) < 0 { continue }
                 if CMTimeCompare(frame.pts, segOutFileTime) > 0 { break }
-                let timelinePTS = CMTimeSubtract(frame.pts, segInFileTime)
+                let sourceTime = CMTimeSubtract(frame.pts, segInFileTime)
+                guard let tl = timeMap.timelineSec(atSource: sourceTime.seconds) else { continue }
+                let timelinePTS = timeMap.isIdentity ? sourceTime : CMTime(seconds: tl, preferredTimescale: 6000)
                 currentTimelinePTS = timelinePTS
+                currentSourceHostPTS = CMTimeAdd(sourceTime, segIn)
 
                 try await Self.waitUntilReady(videoInput, writer: writer, appendedFrames: frameCount)
                 // Drain per frame: CIImage graphs, the rendered pixel buffer and
@@ -217,6 +224,7 @@ public final class ExportPipeline {
                 // a 6,400-frame take reached ~40 GB and froze the Mac).
                 try autoreleasepool { try renderAndAppend(
                     project: input.project, primaryFrame: frame.image, timelinePTS: timelinePTS,
+                    sourceTime: sourceTime,
                     sidecarOffset: sidecarOffset, primary: primary,
                     sidecars: sidecars, ciContext: ciContext,
                     canvasW: canvasW, canvasH: canvasH,
@@ -250,6 +258,7 @@ public final class ExportPipeline {
                 // file-time 0 by AVAssetWriter — convert host-PTS → file-time.
                 let sourceFileTime = primary.fileTime(at: sourceHostPTS)
                 currentTimelinePTS = timelinePTS
+                currentSourceHostPTS = sourceHostPTS
 
                 guard let cg = try? imageGen.copyCGImage(at: sourceFileTime, actualTime: nil) else {
                     continue
@@ -263,6 +272,7 @@ public final class ExportPipeline {
                 // a 6,400-frame take reached ~40 GB and froze the Mac).
                 try autoreleasepool { try renderAndAppend(
                     project: input.project, primaryFrame: primaryFrame, timelinePTS: timelinePTS,
+                    sourceTime: CMTime(seconds: timeMap.sourceSec(at: timelineSec), preferredTimescale: 6000),
                     sidecarOffset: sidecarOffset, primary: primary,
                     sidecars: sidecars, ciContext: ciContext,
                     canvasW: canvasW, canvasH: canvasH,
@@ -311,7 +321,7 @@ public final class ExportPipeline {
                 let timelineDur = CMTime(seconds: timelineDurationSec, preferredTimescale: 600)
                 try await AudioMixer.mix(
                     sources, timelineDuration: timelineDur,
-                    timeMap: hasSpeedRemap ? timeMap : nil,
+                    timeMap: timeMap.isIdentity ? nil : timeMap,
                     into: audioInput,
                     canceled: { [weak self] in self?.isCanceled ?? false }
                 )
@@ -333,7 +343,7 @@ public final class ExportPipeline {
     }
 
     private func renderAndAppend(
-        project: Project, primaryFrame: CIImage, timelinePTS: CMTime,
+        project: Project, primaryFrame: CIImage, timelinePTS: CMTime, sourceTime: CMTime,
         sidecarOffset: CMTime, primary: SourceClip, sidecars: SidecarStreams,
         ciContext: CIContext, canvasW: Int, canvasH: Int,
         outW: Int, outH: Int,
@@ -342,7 +352,7 @@ public final class ExportPipeline {
         frameProvider: @escaping (String, CMTime) -> CIImage?
     ) throws {
         let inputs = Renderer.Inputs(
-            project: project, pts: timelinePTS,
+            project: project, pts: timelinePTS, sourceTime: sourceTime,
             sidecarOffset: sidecarOffset,
             primarySource: primary, primaryFrame: primaryFrame,
             sidecars: sidecars, quality: .high,

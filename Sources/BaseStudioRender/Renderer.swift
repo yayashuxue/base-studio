@@ -10,7 +10,11 @@ public enum Renderer {
     public struct Inputs {
         public let project: Project
         public let pts: CMTime                  // timeline time of this frame
-        public let sidecarOffset: CMTime        // streamTime = pts + offset (used for trim)
+        /// Source time of this frame, seconds since trim-in. Differs from
+        /// `pts` once cuts or speed regions remap the timeline; cursor
+        /// streams and zoom regions live in source time.
+        public let sourceTime: CMTime
+        public let sidecarOffset: CMTime        // streamTime = sourceTime + offset (used for trim)
         public let primarySource: SourceClip
         public let primaryFrame: CIImage
         public let sidecars: SidecarStreams
@@ -22,6 +26,7 @@ public enum Renderer {
         public init(
             project: Project,
             pts: CMTime,
+            sourceTime: CMTime? = nil,
             sidecarOffset: CMTime = .zero,
             primarySource: SourceClip,
             primaryFrame: CIImage,
@@ -33,6 +38,7 @@ public enum Renderer {
         ) {
             self.project = project
             self.pts = pts
+            self.sourceTime = sourceTime ?? pts
             self.sidecarOffset = sidecarOffset
             self.primarySource = primarySource
             self.primaryFrame = primaryFrame
@@ -61,9 +67,9 @@ public enum Renderer {
 
         var image = inputs.primaryFrame
 
-        let streamTime = CMTimeAdd(inputs.pts, inputs.sidecarOffset)
+        let streamTime = CMTimeAdd(inputs.sourceTime, inputs.sidecarOffset)
         let regionResolved = ZoomRegionResolver.resolved(
-            at: inputs.pts, regions: inputs.project.zoomRegions
+            at: inputs.sourceTime, regions: inputs.project.zoomRegions
         )
 
         for inst in inputs.project.nodeGraph.nodes {

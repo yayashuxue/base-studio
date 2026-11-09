@@ -45,6 +45,48 @@ public struct TimeMap: Sendable {
     /// in source-relative time; their speed splits the source range into segments.
     public static func make(
         trimInSec: Double, trimOutSec: Double,
+        speedRegions: [(startSec: Double, endSec: Double, speed: Double)],
+        cuts: [(startSec: Double, endSec: Double)] = []
+    ) -> TimeMap {
+        let base = makeWithoutCuts(trimInSec: trimInSec, trimOutSec: trimOutSec, speedRegions: speedRegions)
+        guard !cuts.isEmpty else { return base }
+        // Remove the cut source ranges (pauses: nothing was recorded there);
+        // the timeline closes up over them. Speeds of what remains are kept.
+        let removed = cuts.map { (max(0, $0.startSec), $0.endSec) }.filter { $0.0 < $0.1 }.sorted { $0.0 < $1.0 }
+        var out: [Segment] = []
+        for seg in base.segments {
+            var pieces = [(seg.sourceStart, seg.sourceEnd)]
+            for (c0, c1) in removed {
+                pieces = pieces.flatMap { (a, b) -> [(Double, Double)] in
+                    if c1 <= a || c0 >= b { return [(a, b)] }
+                    return [(a, c0), (c1, b)].filter { $0.1 - $0.0 > 1e-6 }
+                }
+            }
+            out += pieces.map { Segment(sourceStart: $0.0, sourceEnd: $0.1, speed: seg.speed) }
+        }
+        if out.isEmpty { out = [Segment(sourceStart: 0, sourceEnd: 0, speed: 1)] }
+        return TimeMap(segments: out, trimInSec: trimInSec)
+    }
+
+    /// True when timeline time equals source time (no cuts, no speed).
+    public var isIdentity: Bool {
+        segments.count == 1 && abs(segments[0].speed - 1) < 0.001 && segments[0].sourceStart == 0
+    }
+
+    /// Timeline seconds at a source-relative second, or nil inside a cut.
+    public func timelineSec(atSource s: Double) -> Double? {
+        var elapsed: Double = 0
+        for seg in segments {
+            if s >= seg.sourceStart - 1e-9 && s < seg.sourceEnd {
+                return elapsed + (s - seg.sourceStart) / seg.speed
+            }
+            elapsed += seg.timelineDuration
+        }
+        return nil
+    }
+
+    private static func makeWithoutCuts(
+        trimInSec: Double, trimOutSec: Double,
         speedRegions: [(startSec: Double, endSec: Double, speed: Double)]
     ) -> TimeMap {
         let totalSourceDur = max(0, trimOutSec - trimInSec)

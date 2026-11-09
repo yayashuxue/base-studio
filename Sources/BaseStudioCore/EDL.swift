@@ -23,6 +23,9 @@ public struct Project: Codable, Sendable {
     public var timelineDuration: TimePoint
     public var zoomRegions: [ZoomRegion]
     public var captions: [Caption]
+    /// Source ranges left out of the video, in seconds from the primary
+    /// source's first frame. Pauses land here: nothing was recorded there.
+    public var cuts: [SourceCut]
     /// Filename of a user-uploaded background image inside the global
     /// background library (`~/Library/Application Support/BaseStudio/Backgrounds`).
     /// When set, `BackgroundCompose` paints this image instead of the gradient
@@ -37,7 +40,8 @@ public struct Project: Codable, Sendable {
         timelineDuration: TimePoint,
         zoomRegions: [ZoomRegion] = [],
         captions: [Caption] = [],
-        backgroundImageRel: String? = nil
+        backgroundImageRel: String? = nil,
+        cuts: [SourceCut] = []
     ) {
         self.sources = sources
         self.videoTrack = videoTrack
@@ -47,10 +51,11 @@ public struct Project: Codable, Sendable {
         self.zoomRegions = zoomRegions
         self.captions = captions
         self.backgroundImageRel = backgroundImageRel
+        self.cuts = cuts
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sources, videoTrack, nodeGraph, canvas, timelineDuration, zoomRegions, captions, backgroundImageRel
+        case sources, videoTrack, nodeGraph, canvas, timelineDuration, zoomRegions, captions, backgroundImageRel, cuts
     }
 
     public init(from decoder: Decoder) throws {
@@ -63,6 +68,7 @@ public struct Project: Codable, Sendable {
         zoomRegions = (try? c.decode([ZoomRegion].self, forKey: .zoomRegions)) ?? []
         captions = (try? c.decode([Caption].self, forKey: .captions)) ?? []
         backgroundImageRel = try? c.decodeIfPresent(String.self, forKey: .backgroundImageRel)
+        cuts = (try? c.decodeIfPresent([SourceCut].self, forKey: .cuts)) ?? []
     }
 
     /// Sources keyed by `id`. Built fresh on every call (Project is a value
@@ -86,9 +92,16 @@ public struct Project: Codable, Sendable {
         }
         return TimeMap.make(
             trimInSec: trimInSec, trimOutSec: trimOutSec,
-            speedRegions: regions
+            speedRegions: regions,
+            cuts: cuts.map { (startSec: $0.startSec - trimInSec, endSec: $0.endSec - trimInSec) }
         )
     }
+}
+
+public struct SourceCut: Codable, Sendable, Equatable {
+    public var startSec: Double
+    public var endSec: Double
+    public init(startSec: Double, endSec: Double) { self.startSec = startSec; self.endSec = endSec }
 }
 
 /// Reference to a recorded source file inside the project bundle.
