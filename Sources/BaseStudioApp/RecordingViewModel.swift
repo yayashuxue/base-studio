@@ -92,10 +92,6 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     @Published var showWebcamPreview: Bool = false
     @Published var includeSystemAudio: Bool = true
     @Published var includeMic: Bool = true
-    // ON by default. The menu-bar status item can be missed or hidden behind
-    // notch/menu extras; the floating panel gives the user an obvious Stop
-    // affordance while recording. Users can still toggle it off per session.
-    @Published var showFloatingPanel: Bool = true
     /// Self-view bubble while recording. Separate from `includeWebcam`:
     /// hiding the preview never stops the webcam recording.
     @Published var showCameraWhileRecording: Bool = true
@@ -170,6 +166,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     private let countdown = CountdownOverlay()
     private let recordingPanel = RecordingPanel()
     private let cameraBubble = CameraBubble()
+    private let hotKeys = GlobalHotKeys()
     private var hiddenWindow: NSWindow?
 
     init() {
@@ -292,7 +289,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                 self.phase = .failed(denied)
                 return
             }
-            self.hiddenWindow = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) })
+            // On restart the window is already hidden — keep the one we hid.
+            if let w = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) {
+                self.hiddenWindow = w
+            }
             // Hide the main window NOW (before the 3-second countdown), not
             // after it. Otherwise the app's own UI gets captured for the first
             // 3 seconds of every recording — the exact thing julie hit in #2.
@@ -383,14 +383,19 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         menuBar.onStop = { [weak self] in self?.stopRecording() }
         menuBar.show()
 
-        // Floating Stop dock — shown by default so Stop is visible even when
-        // the menu-bar status item is hidden behind macOS menu extras.
-        if showFloatingPanel {
-            recordingPanel.onStop = { [weak self] in self?.stopRecording() }
-            // No camera in the dock: the home preview was just stopped to
-            // free the camera; the self-view comes from the recorder below.
-            recordingPanel.show(webcamSession: nil, levels: session.levels)
+        // Control bar, always shown: the menu-bar item can be hidden by the
+        // notch, so with no bar there was no visible way to stop (julie, 11/8).
+        recordingPanel.onStop = { [weak self] in self?.stopRecording() }
+        recordingPanel.onRetake = { [weak self] in self?.retakeRecording() }
+        recordingPanel.show(levels: session.levels)
+        hotKeys.onAction = { [weak self] action in
+            switch action {
+            case .stop, .stopLegacy: self?.stopRecording()
+            case .retake: self?.retakeRecording()
+            case .pause: break   // true pause (no samples written) comes next
+            }
         }
+        hotKeys.register()
 
         Task { [weak self] in
             do {
@@ -403,6 +408,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                 }
             } catch {
                 await MainActor.run {
+                    self?.hotKeys.unregister()
                     self?.cameraBubble.hide()
                     self?.recordingPanel.hide()
                     self?.menuBar.hide()
@@ -424,9 +430,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             return
         }
         phase = .finalizing
-        cameraBubble.hide()
-        recordingPanel.hide()
-        menuBar.hide()
+        endRecordingChrome()
         Task { [weak self] in
             do {
                 let bundle = try await session.stop()
@@ -447,6 +451,46 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                     self?.phase = .failed("Stop failed: \(error.localizedDescription)")
                     self?.restoreWindow()
                 }
+            }
+        }
+    }
+
+    private func endRecordingChrome() {
+        hotKeys.unregister()
+        cameraBubble.hide()
+        recordingPanel.hide()
+        menuBar.hide()
+    }
+
+    /// Restart: confirm, finish this take, move it to the Trash (recoverable,
+    /// not deleted), and start a new one with the same settings.
+    func retakeRecording() {
+        guard #available(macOS 13.0, *), phase == .recording,
+              let session = session as? RecordingSession else { return }
+        let alert = NSAlert()
+        alert.messageText = "Restart recording?"
+        alert.informativeText = "This take moves to the Trash and a new recording starts."
+        alert.addButton(withTitle: "Restart")
+        alert.addButton(withTitle: "Keep Recording")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn, phase == .recording else { return }
+        phase = .finalizing
+        endRecordingChrome()
+        Task { [weak self] in
+            let bundle = try? await session.stop()
+            await MainActor.run {
+                guard let self else { return }
+                if let bundle {
+                    do {
+                        try FileManager.default.trashItem(at: bundle.url, resultingItemURL: nil)
+                        BSLog.info("restart: moved \(bundle.url.lastPathComponent) to Trash")
+                    } catch {
+                        BSLog.error("restart: could not move take to Trash (\(error)) — kept in place")
+                    }
+                }
+                self.session = nil
+                self.phase = .idle
+                self.startRecording()
             }
         }
     }

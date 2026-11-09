@@ -1,5 +1,4 @@
 import AppKit
-import BaseStudioCore
 import Foundation
 
 /// Persistent Base Studio item in the system menu bar.
@@ -10,15 +9,12 @@ final class MenuBarController {
     private var statusItem: NSStatusItem?
     private var elapsedTimer: Timer?
     private var startedAt: Date?
-    private var hotkeyMonitor: Any?
-    private var localHotkeyMonitor: Any?
 
     var onStop: (() -> Void)?
     var onShowApp: (() -> Void)?
 
     func showIdle() {
         elapsedTimer?.invalidate(); elapsedTimer = nil
-        removeHotkey()
         startedAt = nil
 
         let item = ensureStatusItem()
@@ -38,7 +34,6 @@ final class MenuBarController {
     }
 
     func show() {
-        installHotkey()
         startedAt = Date()
 
         let item = ensureStatusItem()
@@ -54,9 +49,7 @@ final class MenuBarController {
             button.contentTintColor = .systemRed
             button.font = .menuBarFont(ofSize: 0)
             button.title = " 0:00  Stop "
-            // Only advertise the shortcut when it can actually fire.
-            button.toolTip = Self.globalHotkeyAvailable
-                ? "Click to stop recording  (⌘⇧.)" : "Click to stop recording"
+            button.toolTip = "Click to stop recording  (⌥⇧S)"
         }
 
         elapsedTimer?.invalidate()
@@ -88,38 +81,5 @@ final class MenuBarController {
         } else {
             onShowApp?()
         }
-    }
-
-    // MARK: - hotkey ⌘⇧.
-
-    /// A global keyDown monitor only receives events with Accessibility
-    /// access; without it ⌘⇧. in another app does nothing, silently, while
-    /// the user believes recording stopped. So without access the global
-    /// shortcut is not installed and not advertised (task #17 covers asking
-    /// for the permission).
-    static var globalHotkeyAvailable: Bool { AXIsProcessTrusted() }
-
-    private func installHotkey() {
-        let mask: NSEvent.ModifierFlags = [.command, .shift]
-        if Self.globalHotkeyAvailable {
-            hotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == mask,
-                      event.charactersIgnoringModifiers == "." else { return }
-                Task { @MainActor in self?.onStop?() }
-            }
-        } else {
-            BSLog.info("no Accessibility access — global ⌘⇧. stop shortcut not installed")
-        }
-        localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == mask,
-                  event.charactersIgnoringModifiers == "." else { return event }
-            Task { @MainActor in self?.onStop?() }
-            return nil
-        }
-    }
-    private func removeHotkey() {
-        if let m = hotkeyMonitor { NSEvent.removeMonitor(m) }
-        if let m = localHotkeyMonitor { NSEvent.removeMonitor(m) }
-        hotkeyMonitor = nil; localHotkeyMonitor = nil
     }
 }

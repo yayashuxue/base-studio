@@ -7,7 +7,7 @@ import AVFoundation
 /// recorded — the webcam reaches the video from its own track.
 @MainActor
 final class CameraBubble {
-    private var panel: NSPanel?
+    private(set) var panel: NSPanel?
     private static let size: CGFloat = 160
 
     func show(session: AVCaptureSession) {
