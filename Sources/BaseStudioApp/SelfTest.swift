@@ -259,9 +259,13 @@ enum SelfTest {
             // The screen must cover (almost) the whole take — a recovered
             // encoder failure may cost < 1 s, never the rest of the take.
             r.recordSeconds = recordSeconds
+            // Stopped while paused: screen.mov ends at the pause start. A
+            // resumed pause leaves the raw file at the full take length (gap
+            // inside), so the full length is still expected then.
+            let rawExpected = pauseStopAt.map { min($0, recordSeconds) } ?? recordSeconds
             r.pass = !r.failureJson && r.metadata && r.screenTrack
-                && r.screenDurationSec > max(1.0, recordSeconds - 1.5)
-                && r.screenDurationSec < recordSeconds + 3   // too long is a bug too (60 s take → 119 s)
+                && r.screenDurationSec > max(1.0, rawExpected - 1.5)
+                && r.screenDurationSec < rawExpected + 3   // too long is a bug too (60 s take → 119 s)
                 && r.openOk
                 && (!withWebcam || (r.webcamTrack && r.micTrack))
             if exportEach {
