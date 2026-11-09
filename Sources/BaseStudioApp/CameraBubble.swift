@@ -9,6 +9,7 @@ import AVFoundation
 final class CameraBubble {
     private(set) var panel: NSPanel?
     private static let size: CGFloat = 160
+    var isShown: Bool { panel != nil }
 
     func show(session: AVCaptureSession) {
         hide()

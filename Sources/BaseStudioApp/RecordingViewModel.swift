@@ -297,6 +297,22 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             // after it. Otherwise the app's own UI gets captured for the first
             // 3 seconds of every recording — the exact thing julie hit in #2.
             self.hiddenWindow?.orderOut(nil)
+            // Open the recorder's camera now so the self-view is live through
+            // the countdown (it used to appear 1–2 s into the take while the
+            // camera warmed up). The home preview must let go of it first.
+            let session = self.makeSession()
+            if self.includeWebcam {
+                await self.webcamPreview?.stopAndWait()
+                if self.showCameraWhileRecording {
+                    do {
+                        try await session.prepareWebcam()
+                        if let cam = session.webcamCaptureSession { self.cameraBubble.show(session: cam) }
+                    } catch {
+                        // start() reports camera problems with the proper UI.
+                        BSLog.warn("camera not ready before countdown: \(error)")
+                    }
+                }
+            }
             self.countdown.run(seconds: 3) { [weak self] in
                 Task { @MainActor [weak self] in
                     await self?.beginCapture()
@@ -356,13 +372,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         }
     }
 
-    private func beginCapture() async {
-        guard #available(macOS 13.0, *) else { return }
-        // Release the camera from the home preview before WebcamRecorder opens it.
-        // Two AVCaptureSessions on the same camera collide → AVError -11800 / hang.
-        if includeWebcam {
-            await webcamPreview?.stopAndWait()
-        }
+    /// The session for the next take, created before the countdown so its
+    /// camera can be opened early. Settings are read here, once.
+    @available(macOS 13.0, *)
+    private func makeSession() -> RecordingSession {
         let session = RecordingSession(options: .init(
             includeWebcam: includeWebcam,
             includeSystemAudio: includeSystemAudio,
@@ -370,6 +383,17 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             captureTarget: selectedTarget
         ))
         self.session = session
+        return session
+    }
+
+    private func beginCapture() async {
+        guard #available(macOS 13.0, *) else { return }
+        // Release the camera from the home preview before WebcamRecorder opens it.
+        // Two AVCaptureSessions on the same camera collide → AVError -11800 / hang.
+        if includeWebcam {
+            await webcamPreview?.stopAndWait()
+        }
+        let session = (self.session as? RecordingSession) ?? makeSession()
         session.onCaptureEnded = { [weak self] error in
             Task { @MainActor in
                 guard let self, self.phase == .recording else { return }
@@ -403,6 +427,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                 _ = try await session.start(in: dir)
                 await MainActor.run {
                     guard let self, self.phase == .recording, self.showCameraWhileRecording,
+                          !self.cameraBubble.isShown,
                           let cam = session.webcamCaptureSession else { return }
                     self.cameraBubble.show(session: cam)
                 }

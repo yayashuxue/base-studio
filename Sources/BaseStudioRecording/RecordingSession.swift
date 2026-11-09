@@ -95,6 +95,18 @@ public final class RecordingSession {
 
     var screenRecorderForTests: ScreenRecorder { screenRecorder }
 
+    /// Open the camera before recording (during the countdown) so the
+    /// self-view is live from the first second; nothing is written yet.
+    public func prepareWebcam() async throws {
+        guard options.includeWebcam else { return }
+        try await webcamRecorder.prepare()
+    }
+
+    /// Close a camera opened by `prepareWebcam()` if recording never starts.
+    public func cancelPreparedWebcam() {
+        webcamRecorder.cancelPrepared()
+    }
+
     /// The webcam's capture session while recording (nil without webcam).
     public var webcamCaptureSession: AVCaptureSession? {
         options.includeWebcam ? webcamRecorder.captureSession : nil
@@ -148,6 +160,7 @@ public final class RecordingSession {
                 // sees a chance to grant access). Tear down what we already
                 // started and propagate as a recognisable permission error.
                 BSLog.error("webcam permission denied — aborting recording")
+                webcamRecorder.cancelPrepared()
                 _ = cursorRecorder.stop()
                 if options.includeMic { _ = await micRecorder.stop() }
                 state = .idle
@@ -158,6 +171,7 @@ public final class RecordingSession {
                 // succeed, but the webcam is missing. Surface a visible error
                 // and let the user turn Webcam off if they want screen-only.
                 BSLog.error("webcam start failed — aborting recording: \(error)")
+                webcamRecorder.cancelPrepared()
                 _ = cursorRecorder.stop()
                 if options.includeMic { _ = await micRecorder.stop() }
                 state = .idle

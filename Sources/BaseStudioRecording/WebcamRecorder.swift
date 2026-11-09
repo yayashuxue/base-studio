@@ -46,9 +46,11 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
     /// Same session as the recording, so the camera is opened only once.
     public var captureSession: AVCaptureSession? { session }
 
-    public func start(outputURL: URL) async throws {
-        guard !isRunning else { throw WebcamRecorderError.alreadyRunning }
-
+    /// Open the camera without recording: frames flow (so `captureSession`
+    /// can drive a live self-view during the countdown) but nothing is
+    /// written until `start(outputURL:)`. Idempotent.
+    public func prepare() async throws {
+        guard session == nil else { return }
         // Permission.
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         if status == .notDetermined {
@@ -93,6 +95,23 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
         self.widthPx = Int(dims.width)
         self.heightPx = Int(dims.height)
 
+        self.session = session
+        self.output = output
+        session.startRunning()
+    }
+
+    /// Close a camera opened by `prepare()` that never started recording.
+    public func cancelPrepared() {
+        guard !isRunning, let session else { return }
+        session.stopRunning()
+        self.session = nil
+        self.output = nil
+    }
+
+    public func start(outputURL: URL) async throws {
+        guard !isRunning else { throw WebcamRecorderError.alreadyRunning }
+        try await prepare()
+
         // Writer.
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
@@ -130,15 +149,15 @@ public final class WebcamRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffe
             )
         }
 
-        self.session = session
-        self.output = output
-        self.writer = writer
-        self.videoInput = videoInput
-        self.firstPTS = nil
-        self.lastPTS = nil
-        self.framesAppended = 0
-
-        session.startRunning()
+        // Frames are already arriving on `queue`; hand the writer over there
+        // so the delegate never sees half-set state.
+        queue.sync {
+            self.writer = writer
+            self.videoInput = videoInput
+            self.firstPTS = nil
+            self.lastPTS = nil
+            self.framesAppended = 0
+        }
         isRunning = true
     }
 
