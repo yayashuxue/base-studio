@@ -86,6 +86,15 @@ public final class RecordingSession {
         // (audioLevels is `let`; we pass `levels` to the recorders directly.)
     }
 
+    /// Screen capture ended without `stop()` (e.g. macOS "Stop Sharing").
+    /// Called on a background queue; the owner should call `stop()`.
+    public var onCaptureEnded: (@Sendable (Error) -> Void)? {
+        get { screenRecorder.onCaptureEnded }
+        set { screenRecorder.onCaptureEnded = newValue }
+    }
+
+    var screenRecorderForTests: ScreenRecorder { screenRecorder }
+
     /// The webcam's capture session while recording (nil without webcam).
     public var webcamCaptureSession: AVCaptureSession? {
         options.includeWebcam ? webcamRecorder.captureSession : nil

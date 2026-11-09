@@ -370,6 +370,13 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             captureTarget: selectedTarget
         ))
         self.session = session
+        session.onCaptureEnded = { [weak self] error in
+            Task { @MainActor in
+                guard let self, self.phase == .recording else { return }
+                BSLog.warn("screen capture ended outside the app (\(error.localizedDescription)) — finishing the take")
+                self.stopRecording()
+            }
+        }
         phase = .recording
 
         // Menu bar status item — primary, always-visible Stop with timer.

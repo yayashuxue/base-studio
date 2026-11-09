@@ -226,6 +226,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// sync-marker self-test sets it: its flash window must be recorded.
     private let capturesOwnWindows: Bool
     public var sharedLevels: AudioLevels? { levels }
+    /// Called on an SCK queue when capture ends without stop() being called.
+    public var onCaptureEnded: (@Sendable (Error) -> Void)?
 
     public init(
         captureSystemAudio: Bool = true,
@@ -251,8 +253,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
         let content: SCShareableContent
         do {
+            // onScreenWindowsOnly: false — with the main window hidden and
+            // the Stop dock off, Base Studio has no on-screen window at start,
+            // was missing from `applications`, and the camera bubble shown a
+            // second later got recorded.
             content = try await SCShareableContent.excludingDesktopWindows(
-                false, onScreenWindowsOnly: true
+                false, onScreenWindowsOnly: false
             )
         } catch {
             // Translate SCK's permission errors into our typed error so the UI
@@ -1035,11 +1041,17 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     // MARK: - SCStreamDelegate
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
+        handleStreamStopped(error)
+    }
+
+    /// Capture ended on its own: the user clicked macOS's "Stop Sharing"
+    /// (-3817), the display went away, … Footage up to here is intact
+    /// (stop() keeps it); the owner must finish the take — otherwise the app
+    /// sits in "recording" with nothing arriving and the bundle never closes.
+    func handleStreamStopped(_ error: Error) {
         BSLog.error("SCStream stopped with error: \(error)")
-        // Fold an async SCK stop error into the recorder's failure state so
-        // stop() reports a broken capture instead of silently returning a
-        // partial bundle.
         setStreamStopError(error)
+        onCaptureEnded?(error)
     }
 
     static func bufferContainsAudio(_ buffer: CMSampleBuffer) -> Bool {
