@@ -279,25 +279,22 @@ enum SelfTest {
                 let expected = pauseStopAt ?? (recordSeconds - (pausePlan?.length ?? 0))
                 r.pass = r.pass && r.exportSec > max(1.0, expected - 1.5) && r.exportSec < expected + 3
             }
-            if let at = pauseStopAt {
-                // Stopped while paused: the take ends at the pause; nothing
-                // after it reached any file.
+            if pauseStopAt != nil || pausePlan != nil {
+                // Nothing from the pause may be in ANY file: screen picture,
+                // system audio, webcam, mic, cursor. Stopped while paused =
+                // the pause runs to the end of the take.
                 let meta = try? JSONDecoder().decode(RecordingMetadata.self, from: Data(contentsOf: bundle.metadataURL))
                 r.pauses = meta?.pauses?.count ?? 0
-                let pauseFile = meta?.pauseCuts.first?.startSec ?? at
-                r.framesInPause = await Self.framesBetween(bundle.screenURL, pauseFile + 0.02, 1e9)
-                let micEnd = (try? await AVURLAsset(url: bundle.url.appendingPathComponent("mic.m4a")).load(.duration).seconds) ?? 0
-                let micStart = meta?.micFirstPTS.map { CMTimeSubtract($0.cmTime, meta!.firstVideoPTS.cmTime).seconds } ?? 0
-                r.audioPastPause = max(0, micStart + micEnd - pauseFile)
-                r.pass = r.pass && r.pauses == 1 && r.framesInPause == 0 && r.audioPastPause < 0.05
-            } else if pausePlan != nil {
-                // Nothing written while paused: no screen frame inside the pause.
-                let meta = try? JSONDecoder().decode(RecordingMetadata.self, from: Data(contentsOf: bundle.metadataURL))
-                r.pauses = meta?.pauses?.count ?? 0
-                if let meta, let cut = meta.pauseCuts.first {
-                    r.framesInPause = await Self.framesBetween(bundle.screenURL, cut.startSec + 0.05, cut.endSec - 0.05)
+                if let meta, let p = meta.pauses?.first {
+                    let end = pauseStopAt != nil ? CMTime(seconds: 1e6, preferredTimescale: 1) : p.end.cmTime
+                    r.samplesInPause = await Self.samplesInPause(bundle: bundle, meta: meta,
+                                                                  start: p.start.cmTime, end: end)
                 }
-                r.pass = r.pass && r.pauses == 1 && r.framesInPause == 0
+                // Reopened project carries the cut.
+                r.projectCuts = (try? EditorState.load(bundleURL: bundle.url).project.cuts.count) ?? -1
+                r.framesInPause = r.samplesInPause["screen"] ?? -1
+                r.pass = r.pass && r.pauses == 1 && r.projectCuts == 1
+                    && !r.samplesInPause.isEmpty && r.samplesInPause.values.allSatisfy { $0 == 0 }
             }
             report.runs.append(r)
         }
@@ -334,6 +331,60 @@ enum SelfTest {
         guard !tracks.isEmpty else { return false }
         let dur = (try? await asset.load(.duration).seconds) ?? 0
         return dur > 1.0
+    }
+
+    /// Samples of every track that overlap the pause [start, end) (host
+    /// time, 30 ms margin at each edge for frame/buffer granularity).
+    static func samplesInPause(bundle: ProjectBundle, meta: RecordingMetadata,
+                               start: CMTime, end: CMTime) async -> [String: Int] {
+        let a = start.seconds + 0.03, b = end.seconds - 0.03
+        var out: [String: Int] = [:]
+        func origin(_ t: TimePoint?) -> Double? { t.map { $0.cmTime.seconds } }
+        let screen0 = meta.firstVideoPTS.cmTime.seconds
+        out["screen"] = await count(bundle.screenURL, .video, a - screen0, b - screen0)
+        out["systemAudio"] = await count(bundle.screenURL, .audio, a - screen0, b - screen0)
+        if let w0 = origin(meta.sources?[SourceID.webcam]?.firstVideoPTS) {
+            out["webcam"] = await count(bundle.url.appendingPathComponent("webcam.mov"), .video, a - w0, b - w0)
+        }
+        if let m0 = origin(meta.micFirstPTS) {
+            out["mic"] = await count(bundle.url.appendingPathComponent("mic.m4a"), .audio, a - m0, b - m0)
+        }
+        if let data = try? Data(contentsOf: bundle.cursorURL),
+           let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            func t(_ e: [String: Any]) -> Double {
+                let tt = e["t"] as? [String: Any]
+                return Double(truncating: (tt?["value"] as? NSNumber) ?? 0) / Double(truncating: (tt?["timescale"] as? NSNumber) ?? 1)
+            }
+            let samples = (raw["samples"] as? [[String: Any]] ?? []) + (raw["clicks"] as? [[String: Any]] ?? [])
+            out["cursor"] = samples.filter { let x = t($0); return x > a && x < b }.count
+        }
+        return out
+    }
+
+    /// Samples of the first `type` track whose [pts, pts+duration) overlaps (a, b) file seconds.
+    private static func count(_ url: URL, _ type: AVMediaType, _ a: Double, _ b: Double) async -> Int {
+        let asset = AVURLAsset(url: url)
+        guard b > a, let track = try? await asset.loadTracks(withMediaType: type).first,
+              let reader = try? AVAssetReader(asset: asset) else { return 0 }
+        let out = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        reader.add(out)
+        reader.startReading()
+        var n = 0
+        // Per sample, not per buffer: a buffer can batch packets from both
+        // sides of a gap.
+        while let sb = out.copyNextSampleBuffer() {
+            var count: CMItemCount = 0
+            CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count)
+            guard count > 0 else { continue }
+            var timing = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: count)
+            CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: count, arrayToFill: &timing, entriesNeededOut: &count)
+            for ti in timing {
+                let t0 = ti.presentationTimeStamp.seconds
+                let t1 = t0 + (ti.duration.isValid ? ti.duration.seconds : 0)
+                if t1 > a && t0 < b { n += 1 }
+            }
+        }
+        return n
     }
 
     /// Video samples of `url` (file time) between a and b seconds.
@@ -611,7 +662,8 @@ enum SelfTest {
         var exportSec: Double = 0
         var pauses = 0
         var framesInPause = -1
-        var audioPastPause: Double = 0
+        var samplesInPause: [String: Int] = [:]
+        var projectCuts = -1
         var exportError: String?
         var webcamTrack = false
         var micTrack = false

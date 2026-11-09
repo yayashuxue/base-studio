@@ -437,6 +437,8 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                 await MainActor.run {
                     guard let self else { return }
                     // Stop / Restart pressed while starting runs now, once.
+                    // Show the devices that actually opened, not the settings.
+                    self.recordingPanel.setDevices(cameraOn: session.cameraActive, micOn: session.micActive)
                     switch self.startGate.didStart() {
                     case .stop?: self.stopRecording(); return
                     case .restart?: self.performRestart(session); return

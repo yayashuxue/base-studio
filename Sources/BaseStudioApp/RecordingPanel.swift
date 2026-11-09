@@ -24,7 +24,8 @@ final class RecordingPanel {
     private var micMeterLayer: CALayer?
     private var sysMeterLayer: CALayer?
     private var metersHost: NSView?
-    private var pausedRow: NSView?
+    private var pausedRow: NSStackView?
+    private var pausedRowY: CGFloat = 0
     private var pauseButton: CircleIconButton?
     private var dotLayer: CAShapeLayer?
     private var pausedSince: Date?
@@ -111,21 +112,12 @@ final class RecordingPanel {
         let paused = NSStackView()
         paused.orientation = .horizontal
         paused.spacing = 5
-        for (on, symbol) in [(cameraOn, "video.fill"), (micOn, "mic.fill")] where on {
-            let iv = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
-                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))!)
-            iv.contentTintColor = NSColor.systemOrange
-            paused.addArrangedSubview(iv)
-        }
         paused.alignment = .centerY
-        let fit = paused.fittingSize
-        paused.frame = NSRect(x: (w - fit.width) / 2, y: y, width: fit.width, height: 14)
-        let stillOn = [cameraOn ? "Camera" : nil, micOn ? "Microphone" : nil].compactMap { $0 }
-        paused.toolTip = "Paused — nothing is being recorded."
-            + (stillOn.isEmpty ? "" : " \(stillOn.joined(separator: " and ")) \(stillOn.count == 1 ? "stays" : "stay") on.")
         paused.isHidden = true
         bg.addSubview(paused)
         self.pausedRow = paused
+        self.pausedRowY = y
+        setDevices(cameraOn: cameraOn, micOn: micOn)
         if levels != nil {
             let host = NSView(frame: NSRect(x: (w - Self.meterW) / 2, y: y + 3, width: Self.meterW, height: 8))
             host.wantsLayer = true
@@ -203,6 +195,25 @@ final class RecordingPanel {
         micMeterLayer = nil; sysMeterLayer = nil
         metersHost = nil; pausedRow = nil; pauseButton = nil; dotLayer = nil
         pausedSince = nil; pausedTotal = 0
+    }
+
+    /// Devices that stay open while paused — call again once the take has
+    /// started with what actually opened (a mic can fail without stopping
+    /// the take; the paused state must not claim it is on).
+    func setDevices(cameraOn: Bool, micOn: Bool) {
+        guard let row = pausedRow else { return }
+        row.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for (on, symbol) in [(cameraOn, "video.fill"), (micOn, "mic.fill")] where on {
+            let iv = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))!)
+            iv.contentTintColor = NSColor.systemOrange
+            row.addArrangedSubview(iv)
+        }
+        let fit = row.fittingSize
+        row.frame = NSRect(x: (Self.width - fit.width) / 2, y: pausedRowY, width: fit.width, height: 14)
+        let stillOn = [cameraOn ? "Camera" : nil, micOn ? "Microphone" : nil].compactMap { $0 }
+        row.toolTip = "Paused — nothing is being recorded."
+            + (stillOn.isEmpty ? "" : " \(stillOn.joined(separator: " and ")) \(stillOn.count == 1 ? "stays" : "stay") on.")
     }
 
     /// Paused: timer stops, dot goes amber and still, the meters give way to

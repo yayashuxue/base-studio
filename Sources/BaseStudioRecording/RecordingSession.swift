@@ -94,6 +94,10 @@ public final class RecordingSession {
     /// the paused stretch is written. Devices stay open for a quick resume.
     private let pauseState = PauseState()
     public var isPaused: Bool { pauseState.isPaused }
+    /// Whether the mic actually started (a failed mic doesn't stop the take).
+    public private(set) var micActive = false
+    /// Whether the camera is actually open.
+    public var cameraActive: Bool { webcamCaptureSession != nil }
     public func pause() { if state == .recording { pauseState.pause() } }
     public func resume() { pauseState.resume() }
 
@@ -155,6 +159,7 @@ public final class RecordingSession {
             do {
                 let url = bundle.url.appendingPathComponent("mic.m4a")
                 try await micRecorder.start(outputURL: url)
+                micActive = true
             } catch {
                 BSLog.warn("mic start failed: \(error)")
             }
