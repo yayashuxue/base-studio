@@ -87,38 +87,43 @@ public struct CursorPaint: VideoNode {
     static func cursorSprite(scale: CGFloat) -> CIImage {
         let key = NSNumber(value: Double(scale))
         if let s = cachedSprites.object(forKey: key) { return s }
-
-        let nsImage = NSCursor.arrow.image
-        guard let cg = renderNSImageToCG(nsImage, oversampling: 3) else {
-            return CIImage.empty()
-        }
-        // The CGImage is at 3x resolution; we then scale by `scale / 3` for final size.
+        guard let cg = drawArrow(oversampling: 3) else { return CIImage.empty() }
+        // Drawn at 3×; scale by `scale / 3` for the final size.
         let s = scale / 3.0
-        let img = CIImage(cgImage: cg).transformed(
-            by: CGAffineTransform(scaleX: s, y: s)
-        )
+        let img = CIImage(cgImage: cg).transformed(by: CGAffineTransform(scaleX: s, y: s))
         cachedSprites.setObject(img, forKey: key)
         return img
     }
 
-    private static func renderNSImageToCG(_ image: NSImage, oversampling: Int = 3) -> CGImage? {
-        let size = image.size
-        let w = Int(size.width * CGFloat(oversampling))
-        let h = Int(size.height * CGFloat(oversampling))
-        guard w > 0, h > 0 else { return nil }
-        let cs = CGColorSpaceCreateDeviceRGB()
+    /// The classic arrow, drawn as a vector (black, white outline), tip at the
+    /// sprite's top-left. `NSCursor.arrow.image` is 0×0 on current macOS, so
+    /// the sprite came out empty and no cursor was ever drawn (julie, 11/8).
+    static func drawArrow(oversampling: Int) -> CGImage? {
+        // Arrow outline in points, y down from the tip.
+        let pts: [(CGFloat, CGFloat)] = [(0, 0), (0, 17), (4, 13), (7, 20), (10, 18.8), (7, 12), (12, 12)]
+        let pad: CGFloat = 1.5
+        let w: CGFloat = 12 + pad * 2, h: CGFloat = 20 + pad * 2
+        let k = CGFloat(oversampling)
         guard let ctx = CGContext(
-            data: nil, width: w, height: h, bitsPerComponent: 8,
-            bytesPerRow: 0, space: cs,
+            data: nil, width: Int(w * k), height: Int(h * k), bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
-        ctx.interpolationQuality = .high
-        ctx.setShouldAntialias(true)
-        let nsCtx = NSGraphicsContext(cgContext: ctx, flipped: false)
-        let prev = NSGraphicsContext.current
-        NSGraphicsContext.current = nsCtx
-        image.draw(in: NSRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
-        NSGraphicsContext.current = prev
+        ctx.scaleBy(x: k, y: k)
+        let path = CGMutablePath()
+        for (i, p) in pts.enumerated() {
+            let q = CGPoint(x: p.0 + pad, y: h - (p.1 + pad))   // flip to bottom-left origin
+            if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
+        }
+        path.closeSubpath()
+        ctx.setLineJoin(.round)
+        ctx.addPath(path)
+        ctx.setStrokeColor(CGColor(gray: 1, alpha: 1))
+        ctx.setLineWidth(2.0)
+        ctx.strokePath()
+        ctx.addPath(path)
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        ctx.fillPath()
         return ctx.makeImage()
     }
 }

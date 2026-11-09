@@ -96,6 +96,15 @@ public struct RecordingMetadata: Codable {
     /// fields (widthPx/heightPx) — keeping audio cleanly typed.
     public let micFirstPTS: TimePoint?
 
+    /// Pixels of the recorded frame per display point — what cursor/click
+    /// coordinates (points) must be multiplied by. Taken from the frame
+    /// itself, not `pointScale`: takes recorded at 1× on a 2× Retina display
+    /// (1512 px wide, 1512 pt) stored pointScale 2, which put the cursor
+    /// at twice its position — off the frame, so it never showed.
+    public var pixelsPerPoint: Double {
+        displayWidthPt > 0 ? Double(widthPx) / displayWidthPt : pointScale
+    }
+
     public init(
         displayID: UInt32,
         widthPx: Int, heightPx: Int,

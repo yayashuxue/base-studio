@@ -66,8 +66,16 @@ public enum Renderer {
             at: inputs.pts, regions: inputs.project.zoomRegions
         )
 
-        for inst in inputs.project.nodeGraph.nodes where inst.enabled {
-            guard let node = NodeRegistry.videoNode(inst.nodeType) else { continue }
+        for inst in inputs.project.nodeGraph.nodes {
+            // Background off: the frame still has to land in canvas space —
+            // later nodes (webcam overlay) and the output assume it. Without
+            // this the screen sat 1:1 in the bottom-left corner, cropped
+            // (julie: "remove 背景视觉会偏").
+            if inst.nodeType == "background_compose", !inst.enabled {
+                image = fitToCanvas(image, canvas: inputs.project.canvas)
+                continue
+            }
+            guard inst.enabled, let node = NodeRegistry.videoNode(inst.nodeType) else { continue }
             var resolved = ParamResolver.resolve(
                 bindings: inst.bindings, at: inputs.pts,
                 streamTime: streamTime, sidecars: inputs.sidecars
@@ -95,5 +103,19 @@ public enum Renderer {
         }
 
         return image
+    }
+
+    /// Scale `image` to fit the canvas, centred, over black.
+    static func fitToCanvas(_ image: CIImage, canvas: CanvasSpec) -> CIImage {
+        let cw = CGFloat(canvas.widthPx), ch = CGFloat(canvas.heightPx)
+        let e = image.extent
+        guard e.width > 0, e.height > 0 else { return image }
+        let k = min(cw / e.width, ch / e.height)
+        let placed = image
+            .transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY))
+            .transformed(by: CGAffineTransform(scaleX: k, y: k))
+            .transformed(by: CGAffineTransform(translationX: (cw - e.width * k) / 2, y: (ch - e.height * k) / 2))
+        let rect = CGRect(x: 0, y: 0, width: cw, height: ch)
+        return placed.composited(over: CIImage(color: .black).cropped(to: rect)).cropped(to: rect)
     }
 }

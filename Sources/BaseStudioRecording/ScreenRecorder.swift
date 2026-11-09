@@ -357,7 +357,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         let widthPx2 = (widthPx >> 1) << 1
         let heightPx2 = (heightPx >> 1) << 1
         self.displayID = displayUsed.displayID
-        self.pointScale = scale
+        // Pixels per point of the frame actually recorded (it may be capped
+        // below the display's backing scale), not the backing scale itself.
+        let sizePt = self.displaySizePt
+        self.pointScale = sizePt.width > 0 ? Double(widthPx2) / Double(sizePt.width) : scale
         self.widthPx = widthPx2
         self.heightPx = heightPx2
         let widthPxFinal = widthPx2
