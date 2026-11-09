@@ -31,7 +31,8 @@ final class RecordingPanel {
     private static let originKey = "RecordingControlBar.origin"
     private static let meterW: CGFloat = 32
 
-    func show(levels: AudioLevels? = nil) {
+    /// `stopKey` / `restartKey`: shortcut text to show, only if registered.
+    func show(levels: AudioLevels? = nil, stopKey: String? = nil, restartKey: String? = nil) {
         self.audioLevels = levels
         guard panel == nil else { return }
 
@@ -124,7 +125,7 @@ final class RecordingPanel {
             symbol: "arrow.counterclockwise", fill: NSColor.white.withAlphaComponent(0.14),
             hover: NSColor.white.withAlphaComponent(0.24)
         )
-        retake.toolTip = "Restart  (⌥⇧R)"
+        retake.toolTip = restartKey.map { "Restart  (\($0))" } ?? "Restart"
         retake.target = self
         retake.action = #selector(retakeAction)
         bg.addSubview(retake)
@@ -135,7 +136,7 @@ final class RecordingPanel {
             frame: NSRect(x: (w - 36) / 2, y: y, width: 36, height: 36),
             symbol: "stop.fill", fill: DockPaint.recordingRed, hover: DockPaint.recordingHot
         )
-        stop.toolTip = "Stop  (⌥⇧S)"
+        stop.toolTip = stopKey.map { "Stop  (\($0))" } ?? "Stop"
         stop.target = self
         stop.action = #selector(stopAction)
         bg.addSubview(stop)

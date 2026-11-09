@@ -33,6 +33,9 @@ final class MenuBarController {
         }
     }
 
+    /// Shortcut shown in the tooltip, only when it is registered.
+    var stopKey: String?
+
     func show() {
         startedAt = Date()
 
@@ -49,7 +52,7 @@ final class MenuBarController {
             button.contentTintColor = .systemRed
             button.font = .menuBarFont(ofSize: 0)
             button.title = " 0:00  Stop "
-            button.toolTip = "Click to stop recording  (⌥⇧S)"
+            button.toolTip = stopKey.map { "Click to stop recording  (\($0))" } ?? "Click to stop recording"
         }
 
         elapsedTimer?.invalidate()

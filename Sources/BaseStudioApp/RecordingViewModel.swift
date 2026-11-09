@@ -167,6 +167,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     private let recordingPanel = RecordingPanel()
     private let cameraBubble = CameraBubble()
     private let hotKeys = GlobalHotKeys()
+    private var startGate = TakeStartGate()
     private var hiddenWindow: NSWindow?
 
     init() {
@@ -402,37 +403,49 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             }
         }
         phase = .recording
+        startGate.reset()
+
+        hotKeys.onAction = { [weak self] action in
+            switch action {
+            case .stop, .stopLegacy: self?.stopRecording()
+            case .retake: self?.retakeRecording()
+            }
+        }
+        let keys = hotKeys.register()
+        let stopKey = keys.contains(.stop) ? "⌥⇧S" : (keys.contains(.stopLegacy) ? "⌘⇧." : nil)
 
         // Menu bar status item — primary, always-visible Stop with timer.
         menuBar.onStop = { [weak self] in self?.stopRecording() }
+        menuBar.stopKey = stopKey
         menuBar.show()
 
         // Control bar, always shown: the menu-bar item can be hidden by the
         // notch, so with no bar there was no visible way to stop (julie, 11/8).
         recordingPanel.onStop = { [weak self] in self?.stopRecording() }
         recordingPanel.onRetake = { [weak self] in self?.retakeRecording() }
-        recordingPanel.show(levels: session.levels)
-        hotKeys.onAction = { [weak self] action in
-            switch action {
-            case .stop, .stopLegacy: self?.stopRecording()
-            case .retake: self?.retakeRecording()
-            case .pause: break   // true pause (no samples written) comes next
-            }
-        }
-        hotKeys.register()
+        recordingPanel.show(levels: session.levels, stopKey: stopKey,
+                            restartKey: keys.contains(.retake) ? "⌥⇧R" : nil)
 
         Task { [weak self] in
             do {
                 let dir = try Self.recordingsDirectory()
                 _ = try await session.start(in: dir)
                 await MainActor.run {
-                    guard let self, self.phase == .recording, self.showCameraWhileRecording,
+                    guard let self else { return }
+                    // Stop / Restart pressed while starting runs now, once.
+                    switch self.startGate.didStart() {
+                    case .stop?: self.stopRecording(); return
+                    case .restart?: self.performRestart(session); return
+                    case nil: break
+                    }
+                    guard self.phase == .recording, self.showCameraWhileRecording,
                           !self.cameraBubble.isShown,
                           let cam = session.webcamCaptureSession else { return }
                     self.cameraBubble.show(session: cam)
                 }
             } catch {
                 await MainActor.run {
+                    self?.startGate.didFail()
                     self?.hotKeys.unregister()
                     self?.cameraBubble.hide()
                     self?.recordingPanel.hide()
@@ -452,6 +465,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         // a second call without this guard crashes the app.
         guard phase == .recording else {
             BSLog.warn("stopRecording ignored — phase=\(phase)")
+            return
+        }
+        guard startGate.request(.stop) else {
+            BSLog.info("stop pressed while the take is starting — stopping once capture is up")
             return
         }
         phase = .finalizing
@@ -499,23 +516,46 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         alert.addButton(withTitle: "Keep Recording")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn, phase == .recording else { return }
+        guard startGate.request(.restart) else {
+            BSLog.info("restart confirmed while the take is starting — restarting once capture is up")
+            return
+        }
+        performRestart(session)
+    }
+
+    /// Only a take that was finished AND moved to the Trash is replaced; if
+    /// either fails, the take is kept where it is, the error is shown, and no
+    /// new recording starts (the dialog promised the old one goes to Trash).
+    @available(macOS 13.0, *)
+    private func performRestart(_ session: RecordingSession) {
+        guard phase == .recording else { return }
         phase = .finalizing
         endRecordingChrome()
         Task { [weak self] in
-            let bundle = try? await session.stop()
+            var problem: String?
+            do {
+                let bundle = try await session.stop()
+                do {
+                    try FileManager.default.trashItem(at: bundle.url, resultingItemURL: nil)
+                    BSLog.info("restart: moved \(bundle.url.lastPathComponent) to Trash")
+                } catch {
+                    problem = "Couldn't move the take to the Trash (\(error.localizedDescription)). It's kept in your recordings."
+                }
+            } catch {
+                problem = "Couldn't finish the take (\(error.localizedDescription)). Whatever was recorded is kept."
+            }
             await MainActor.run {
                 guard let self else { return }
-                if let bundle {
-                    do {
-                        try FileManager.default.trashItem(at: bundle.url, resultingItemURL: nil)
-                        BSLog.info("restart: moved \(bundle.url.lastPathComponent) to Trash")
-                    } catch {
-                        BSLog.error("restart: could not move take to Trash (\(error)) — kept in place")
-                    }
-                }
                 self.session = nil
-                self.phase = .idle
-                self.startRecording()
+                if let problem {
+                    BSLog.error("restart stopped: \(problem)")
+                    self.phase = .failed("Restart stopped: \(problem)")
+                    self.restoreWindow()
+                    self.refreshLibrary()
+                } else {
+                    self.phase = .idle
+                    self.startRecording()
+                }
             }
         }
     }
