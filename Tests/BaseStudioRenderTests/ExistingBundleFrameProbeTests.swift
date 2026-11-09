@@ -19,7 +19,20 @@ final class ExistingBundleFrameProbeTests: XCTestCase {
         project.videoTrack.segments[0].sourceIn = TimePoint(start)
         project.videoTrack.segments[0].sourceOut = TimePoint(CMTimeAdd(start, CMTime(seconds: 3, preferredTimescale: 600)))
         project.timelineDuration = TimePoint(CMTime(seconds: 3, preferredTimescale: 600))
-        project.zoomRegions = []
+        // Keep zoom/speed regions overlapping the slice (shifted into it)
+        // with BS_PROBE_KEEP_REGIONS=1; otherwise drop them.
+        if ProcessInfo.processInfo.environment["BS_PROBE_KEEP_REGIONS"] == "1" {
+            project.zoomRegions = project.zoomRegions.compactMap { r in
+                var r = r
+                let a = r.timelineIn.seconds - at, b = r.timelineOut.seconds - at
+                guard b > 0, a < 3 else { return nil }
+                r.timelineIn = TimePoint(CMTime(seconds: max(0, a), preferredTimescale: 600))
+                r.timelineOut = TimePoint(CMTime(seconds: min(3, b), preferredTimescale: 600))
+                return r
+            }
+        } else {
+            project.zoomRegions = []
+        }
 
         for (label, bgOn) in [("as-is", true), ("no-bg", false)] {
             var p = project

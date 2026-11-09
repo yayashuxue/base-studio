@@ -84,6 +84,79 @@ final class ExportAVSyncTests: XCTestCase {
         for x in p { XCTAssertEqual(x.offsetMs, 0, accuracy: 25, "audio off after the cut: \(p)") }
     }
 
+    /// The editor's playback item (PreviewPlayback) must follow the same
+    /// TimeMap as export — speed and cuts — with picture and sound together.
+    func testPreviewItemFollowsSpeedAndCutInSync() async throws {
+        guard let ffmpeg = Self.ffmpeg else { throw XCTSkip("ffmpeg not installed") }
+        durationSec = 6
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("bs-prev-\(UUID().uuidString)", isDirectory: true)
+        let bundle = tmp.appendingPathComponent("rec.basestudio", isDirectory: true)
+        try fm.createDirectory(at: bundle, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+        try run(ffmpeg, ["-v", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=\(w)x\(h):r=30:d=\(durationSec)",
+            "-f", "lavfi", "-i", "aevalsrc='0.8*sin(2*PI*1000*t)*lt(mod(t\\,1)\\,0.02)*gte(t\\,0.5)':s=48000:d=\(durationSec)",
+            "-vf", "drawbox=c=white:t=fill:enable='lt(mod(t\\,1)\\,0.067)*gte(t\\,0.5)'",
+            "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30",
+            "-c:a", "aac", "-ac", "2", bundle.appendingPathComponent("screen.mov").path])
+        try writeMetadata(bundle.appendingPathComponent("metadata.json"))
+
+        // 2× over 1–3 s, paused 3.5–4.5 s. Flashes at source 1,2,3,5 s land
+        // at 1.0, 1.5, 2.0, 3.0 s; the one at 4 s was never recorded.
+        var project = makeProject(cuts: [SourceCut(startSec: 3.5, endSec: 4.5)])
+        project.nodeGraph = NodeGraph(nodes: [])
+        project.zoomRegions = [ZoomRegion(
+            id: "z", timelineIn: TimePoint(CMTime(seconds: 1, preferredTimescale: 600)),
+            timelineOut: TimePoint(CMTime(seconds: 3, preferredTimescale: 600)),
+            scale: 1, followCursor: false, fixedCenter: nil, transitionSec: 0.1, speed: 2)]
+        let map = project.timeMap(primaryFirstPTS: hostFirstPTS)
+        XCTAssertEqual(map.timelineDurationSec, 4, accuracy: 1e-6)
+        let audio = [AudioMixer.Source(url: bundle.appendingPathComponent("screen.mov"), originPTS: .zero, gain: 1)]
+        let ctx = PreviewPlayback.Context(project: project, timeMap: map, primary: project.sources[0],
+                                          sidecars: SidecarStreams(), backgroundImage: nil)
+        let item = try await PreviewPlayback.makeItem(ctx, bundleURL: bundle, audio: audio, scale: 0.5)
+        let asset = item.asset
+
+        // Picture through the compositor.
+        let reader = try AVAssetReader(asset: asset)
+        let vOut = AVAssetReaderVideoCompositionOutput(videoTracks: try await asset.loadTracks(withMediaType: .video),
+            videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        vOut.videoComposition = item.videoComposition
+        reader.add(vOut)
+        let aOut = AVAssetReaderAudioMixOutput(audioTracks: try await asset.loadTracks(withMediaType: .audio), audioSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false, AVSampleRateKey: 48_000, AVNumberOfChannelsKey: 1])
+        aOut.audioMix = item.audioMix
+        reader.add(aOut)
+        XCTAssertTrue(reader.startReading())
+        var flashes: [Double] = []; var prevBright = false
+        while let sb = vOut.copyNextSampleBuffer(), let pb = CMSampleBufferGetImageBuffer(sb) {
+            CVPixelBufferLockBaseAddress(pb, .readOnly)
+            let base = CVPixelBufferGetBaseAddress(pb)!.assumingMemoryBound(to: UInt8.self)
+            let row = CVPixelBufferGetBytesPerRow(pb), hh = CVPixelBufferGetHeight(pb)
+            let bright = base[(hh / 2) * row + 4 * (CVPixelBufferGetWidth(pb) / 4) + 1] > 128
+            CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+            if bright && !prevBright { flashes.append(CMSampleBufferGetPresentationTimeStamp(sb).seconds) }
+            prevBright = bright
+        }
+        var clicks: [Double] = []; var last = -9.0; var n = 0
+        while let sb = aOut.copyNextSampleBuffer(), let bb = CMSampleBufferGetDataBuffer(sb) {
+            let len = CMBlockBufferGetDataLength(bb)
+            var f = [Float](repeating: 0, count: len / 4)
+            _ = f.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: len, destination: $0.baseAddress!) }
+            for (i, v) in f.enumerated() where abs(v) > 0.1 {
+                let t = Double(n + i) / 48_000
+                if t - last > 0.3 { clicks.append(t) }
+                last = t
+            }
+            n += f.count
+        }
+        XCTAssertEqual(flashes.map { ($0 * 10).rounded() / 10 }, [1, 1.5, 2, 3], "preview picture: \(flashes)")
+        XCTAssertEqual(clicks.count, flashes.count, "clicks \(clicks) vs flashes \(flashes)")
+        for (f, c) in zip(flashes, clicks) { XCTAssertEqual(c, f, accuracy: 0.05, "preview sound vs picture: \(clicks) \(flashes)") }
+    }
+
     // MARK: - measurement
 
     /// Click onset minus flash onset (ms) for each pair.

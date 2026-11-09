@@ -65,10 +65,13 @@ final class EditorState: ObservableObject {
             if ended {
                 self.isPlaying = false
                 self.playheadSec = 0
+                self.scheduleRender()
             } else {
                 self.playheadSec = sec
+                // While playing, the player draws the picture (PlayerLayerView);
+                // rendering here too only competed with it for the CPU.
+                if !self.playerDrawsPicture { self.scheduleRender() }
             }
-            self.scheduleRender()
         }
         return c
     }()
@@ -394,10 +397,28 @@ final class EditorState: ObservableObject {
     func pause() {
         isPlaying = false
         clock.pause()
+        scheduleRender()   // full-quality still at the stop point
     }
+
+    /// The player that shows playback (picture and sound).
+    var previewPlayer: AVPlayer { previewAudio.player }
+    /// true when the current playback item renders the picture itself.
+    @Published private(set) var playerDrawsPicture = false
 
     private func makePreviewAudioItem() async -> AVPlayerItem? {
         let sources = await AudioPlan.sources(project: project, bundleURL: bundleURL, meta: recordingMeta)
+        // Picture + sound through PreviewPlayback (off-main, hardware decode,
+        // one clock). Falls back to sound only, with the old per-frame render.
+        do {
+            let ctx = PreviewPlayback.Context(project: project, timeMap: timeMap, primary: primarySource,
+                                              sidecars: sidecars, backgroundImage: backgroundImageCache)
+            let item = try await PreviewPlayback.makeItem(ctx, bundleURL: bundleURL, audio: sources)
+            playerDrawsPicture = item.videoComposition != nil
+            return item
+        } catch {
+            BSLog.warn("preview playback unavailable (\(error)); falling back to per-frame preview")
+            playerDrawsPicture = false
+        }
         do {
             guard let built = try await PreviewAudio.build(sources: sources, timeMap: timeMap) else { return nil }
             let item = AVPlayerItem(asset: built.composition)
@@ -443,7 +464,7 @@ final class EditorState: ObservableObject {
         await renderInternal(project: project, at: pts)
     }
 
-    private func renderInternal(project: Project, at pts: CMTime) async -> NSImage? {
+    func renderInternal(project: Project, at pts: CMTime) async -> NSImage? {
         guard let primaryImg = await sourceFrameAsync(primarySource.id, timelinePTS: pts) else {
             return nil
         }

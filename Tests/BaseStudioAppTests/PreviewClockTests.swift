@@ -8,11 +8,18 @@ final class PreviewClockTests: XCTestCase {
 
     final class FakeAudio: PreviewAudioOutput {
         var prepareDelay: UInt64 = 0
+        /// When true, prepare() waits until the test calls release() — no
+        /// timing race with a loaded machine.
+        var gated = false
+        private var waiter: CheckedContinuation<Void, Never>?
+        private var released = false
+        func release() { released = true; waiter?.resume(); waiter = nil }
         var hasAudio = true
         var started: Double?
         var currentSeconds: Double = 0
         var endSeconds: Double = 10
         func prepare() async -> Bool {
+            if gated && !released { await withCheckedContinuation { waiter = $0 } }
             if prepareDelay > 0 { try? await Task.sleep(nanoseconds: prepareDelay) }
             return hasAudio
         }
@@ -24,8 +31,10 @@ final class PreviewClockTests: XCTestCase {
     func testSlowAudioPreparationHoldsThePicture() async throws {
         // A 3 s take whose sound takes 4 s to prepare: the old code ran the
         // picture to the end before any sound started.
+        // Preparation is held open by the test (not timed): flaked once
+        // under load when a 300 ms sleep overshot a 400 ms preparation.
         let audio = FakeAudio()
-        audio.prepareDelay = 400_000_000
+        audio.gated = true
         let clock = PreviewClock(output: audio, interval: 0.02)
         var ticks: [Double] = []
         clock.onTick = { sec, _ in ticks.append(sec) }
@@ -34,7 +43,11 @@ final class PreviewClockTests: XCTestCase {
         XCTAssertTrue(ticks.isEmpty, "playhead moved before the sound was ready: \(ticks)")
         XCTAssertNil(audio.started)
 
-        try await Task.sleep(nanoseconds: 300_000_000)
+        audio.release()
+        // Wait (bounded) for the sound to start and a couple of ticks.
+        for _ in 0..<150 where audio.started == nil || ticks.count < 2 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         XCTAssertEqual(audio.started, 1.0, "sound must start where the playhead was")
         // Player is buffering (its time does not advance): picture holds.
         let held = ticks.count

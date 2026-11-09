@@ -104,10 +104,11 @@ final class PreviewClock {
     }
 }
 
-/// `AVPlayer` implementation for the real editor.
+/// `AVPlayer` implementation for the real editor: plays the whole preview
+/// item (picture via PreviewCompositor + sound), shown by PlayerLayerView.
 @MainActor
 final class PlayerPreviewAudio: PreviewAudioOutput {
-    private let player = AVPlayer()
+    let player = AVPlayer()
     private let makeItem: () async -> AVPlayerItem?
     var stale = true
     private var end: Double = 0
