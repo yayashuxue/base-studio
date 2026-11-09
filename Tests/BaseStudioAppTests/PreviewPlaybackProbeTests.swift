@@ -50,7 +50,7 @@ final class PreviewPlaybackProbeTests: XCTestCase {
             await player.seek(to: CMTime(seconds: at, preferredTimescale: 600))
             for _ in 0..<100 where playItem.status != .readyToPlay { try await Task.sleep(nanoseconds: 20_000_000) }
             XCTAssertEqual(playItem.status, .readyToPlay, "item error: \(String(describing: playItem.error))")
-            let before = PreviewCompositor.framesComposed
+            let before = PreviewCompositor.stats.frames
             player.play()
             let t0 = CFAbsoluteTimeGetCurrent()
             var shown = 0
@@ -62,8 +62,8 @@ final class PreviewPlaybackProbeTests: XCTestCase {
             let advanced = player.currentTime().seconds - at
             player.pause()
             print(String(format: "PREVIEW real playback: %.1f fps shown, %.1f fps composed, clock advanced %.2f s in 6 s, item error %@, compositor error %@",
-                         Double(shown) / 6, Double(PreviewCompositor.framesComposed - before) / 6, advanced,
-                         String(describing: playItem.error), PreviewCompositor.lastError ?? "none"))
+                         Double(shown) / 6, Double(PreviewCompositor.stats.frames - before) / 6, advanced,
+                         String(describing: playItem.error), PreviewCompositor.stats.lastError ?? "none"))
         }
         let s = ms.sorted()
         // Memory: 30 s of continuous playback frames through the compositor,
@@ -93,8 +93,8 @@ final class PreviewPlaybackProbeTests: XCTestCase {
         }
         let seqFPS = Double(frames) / (CFAbsoluteTimeGetCurrent() - seqStart)
         print(String(format: "PREVIEW per-frame: graph build %.1f ms, GPU draw %.1f ms (avg over composed frames)",
-                     PreviewCompositor.buildMs / Double(max(1, PreviewCompositor.framesComposed)),
-                     PreviewCompositor.drawMs / Double(max(1, PreviewCompositor.framesComposed))))
+                     PreviewCompositor.stats.buildMs / Double(max(1, PreviewCompositor.stats.frames)),
+                     PreviewCompositor.stats.drawMs / Double(max(1, PreviewCompositor.stats.frames))))
         print(String(format: "PREVIEW sequential compositor throughput: %.1f fps (needs 30)", seqFPS))
         for _ in 0..<40 {
             let t = CMTime(seconds: Double.random(in: 0..<max(1, dur - 1)), preferredTimescale: 600)

@@ -76,7 +76,17 @@ public enum PreviewPlayback {
                 // (an asset reader is lenient), so use the composition's own.
                 timeRange: CMTimeRange(start: .zero, duration: comp.duration),
                 screenTrack: screenID, webcamTrack: trackIDs[SourceID.webcam], context: ctx, scale: scale)]
-            if (try? await vc.isValid(for: comp, timeRange: CMTimeRange(start: .zero, duration: comp.duration), validationDelegate: nil)) == false {
+            // Both "invalid" and "couldn't validate" fall back (the caller
+            // catches): never hand the player a composition it may not draw.
+            let valid: Bool
+            do {
+                valid = try await vc.isValid(for: comp, timeRange: CMTimeRange(start: .zero, duration: comp.duration),
+                                             validationDelegate: nil)
+            } catch {
+                throw NSError(domain: "BaseStudio.Preview", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "couldn't validate preview composition: \(error.localizedDescription)"])
+            }
+            guard valid else {
                 throw NSError(domain: "BaseStudio.Preview", code: 2,
                               userInfo: [NSLocalizedDescriptionKey: "preview video composition is invalid"])
             }
@@ -145,11 +155,12 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
 
     /// Probe only (BS_PREVIEW_TRIVIAL=1): pass the screen frame through.
     static let trivial = ProcessInfo.processInfo.environment["BS_PREVIEW_TRIVIAL"] == "1"
-    /// Frames composed so far (probes/diagnostics).
-    nonisolated(unsafe) static var framesComposed = 0
-    nonisolated(unsafe) static var lastError: String?
-    nonisolated(unsafe) static var buildMs = 0.0
-    nonisolated(unsafe) static var drawMs = 0.0
+    /// Probe statistics, behind a lock (frames compose concurrently).
+    struct Stats { var frames = 0; var buildMs = 0.0; var drawMs = 0.0; var lastError: String? }
+    private static let statsLock = NSLock()
+    nonisolated(unsafe) private static var _stats = Stats()
+    static var stats: Stats { statsLock.withLock { _stats } }
+    static func record(_ f: (inout Stats) -> Void) { statsLock.withLock { f(&_stats) } }
 
     func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {}
 
@@ -159,7 +170,7 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
             // autoreleased (export once grew to 40 GB without one).
             guard let ins = request.videoCompositionInstruction as? PreviewInstruction,
                   let out = request.renderContext.newPixelBuffer() else {
-                PreviewCompositor.lastError = "no instruction or output buffer"
+                PreviewCompositor.record { $0.lastError = "no instruction or output buffer" }
                 request.finish(with: NSError(domain: "BaseStudio.Preview", code: 1))
                 return
             }
@@ -191,9 +202,8 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
             let image = Renderer.render(inputs)
             let t1 = CFAbsoluteTimeGetCurrent()
             ciContext.render(image, to: out)
-            PreviewCompositor.buildMs += (t1 - t0) * 1000
-            PreviewCompositor.drawMs += (CFAbsoluteTimeGetCurrent() - t1) * 1000
-            PreviewCompositor.framesComposed += 1
+            let t2 = CFAbsoluteTimeGetCurrent()
+            PreviewCompositor.record { $0.frames += 1; $0.buildMs += (t1 - t0) * 1000; $0.drawMs += (t2 - t1) * 1000 }
             request.finish(withComposedVideoFrame: out)
         } }
     }
