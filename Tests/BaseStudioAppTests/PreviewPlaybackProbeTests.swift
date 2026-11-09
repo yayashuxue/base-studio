@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import AVFoundation
 import XCTest
 @testable import BaseStudioApp
@@ -38,6 +39,41 @@ final class PreviewPlaybackProbeTests: XCTestCase {
             }
         }
         let s = ms.sorted()
+        // Memory: 30 s of continuous playback frames through the compositor,
+        // then 40 random seeks; footprint must not keep climbing.
+        func footprintMB() -> Int {
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+            }
+            return kr == KERN_SUCCESS ? Int(info.phys_footprint / 1_048_576) : -1
+        }
+        let base = footprintMB()
+        let reader = try AVAssetReader(asset: item.asset)
+        reader.timeRange = CMTimeRange(start: CMTime(seconds: at, preferredTimescale: 600), duration: CMTime(seconds: 30, preferredTimescale: 600))
+        let vOut = AVAssetReaderVideoCompositionOutput(videoTracks: try await item.asset.loadTracks(withMediaType: .video),
+                                                       videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        vOut.videoComposition = item.videoComposition
+        reader.add(vOut)
+        XCTAssertTrue(reader.startReading())
+        let seqStart = CFAbsoluteTimeGetCurrent()
+        var frames = 0, peak = base, samples: [Int] = []
+        while let sb = vOut.copyNextSampleBuffer() {
+            _ = sb; frames += 1
+            if frames % 60 == 0 { let m = footprintMB(); peak = max(peak, m); samples.append(m)
+                if m > 1500 { XCTFail("footprint \(m) MB > 1500 MB"); break } }
+        }
+        let seqFPS = Double(frames) / (CFAbsoluteTimeGetCurrent() - seqStart)
+        print(String(format: "PREVIEW sequential compositor throughput: %.1f fps (needs 30)", seqFPS))
+        for _ in 0..<40 {
+            let t = CMTime(seconds: Double.random(in: 0..<max(1, dur - 1)), preferredTimescale: 600)
+            _ = try? await gen.image(at: t)
+            peak = max(peak, footprintMB())
+        }
+        print("PREVIEW memory: base \(base) MB, peak \(peak) MB over \(frames) frames + 40 seeks; per-2s samples \(samples)")
+        XCTAssertEqual(reader.status, .completed)
+        XCTAssertLessThan(peak - base, 600, "preview playback memory grew \(peak - base) MB")
         print(String(format: "PREVIEW compositor frame ms: median %.0f p90 %.0f (random access via generator; playback decodes sequentially)", s[15], s[27]))
     }
 }

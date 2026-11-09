@@ -1,4 +1,5 @@
 import AVFoundation
+import BaseStudioCore
 import Foundation
 
 /// The sound side of editor playback.
@@ -115,6 +116,10 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
 
     init(makeItem: @escaping () async -> AVPlayerItem?) { self.makeItem = makeItem }
 
+    /// Called when the item can't play (status .failed) — the owner falls
+    /// back to the per-frame preview.
+    var onItemFailed: ((Error?) -> Void)?
+
     func prepare() async -> Bool {
         if stale {
             stale = false
@@ -122,7 +127,20 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
             player.replaceCurrentItem(with: item)
             end = (try? await item?.asset.load(.duration).seconds) ?? 0
         }
-        return player.currentItem != nil
+        guard let item = player.currentItem else { return false }
+        // A built item can still fail to prepare (e.g. the compositor or a
+        // track); wait for a verdict (bounded) instead of assuming it plays.
+        for _ in 0..<100 where item.status == .unknown {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        if item.status == .failed {
+            BSLog.error("preview item failed: \(String(describing: item.error))")
+            player.replaceCurrentItem(with: nil)
+            stale = true
+            onItemFailed?(item.error)
+            return false
+        }
+        return true
     }
 
     func start(at sec: Double) async {

@@ -57,7 +57,11 @@ final class EditorState: ObservableObject {
     private var renderPending = false
     /// The take's sound while previewing (same sources and TimeMap as
     /// export); its clock drives the playhead — see PreviewClock.
-    private lazy var previewAudio = PlayerPreviewAudio { [weak self] in await self?.makePreviewAudioItem() }
+    private lazy var previewAudio: PlayerPreviewAudio = {
+        let p = PlayerPreviewAudio { [weak self] in await self?.makePreviewAudioItem() }
+        p.onItemFailed = { [weak self] _ in self?.playerDrawsPicture = false }
+        return p
+    }()
     private lazy var clock: PreviewClock = {
         let c = PreviewClock(output: previewAudio)
         c.onTick = { [weak self] sec, ended in

@@ -126,18 +126,22 @@ final class PreviewInstruction: NSObject, AVVideoCompositionInstructionProtocol 
 /// Draws each playback frame with `Renderer` from the decoded source frames.
 final class PreviewCompositor: NSObject, AVVideoCompositing {
     let sourcePixelBufferAttributes: [String: any Sendable]? = [
-        kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange],
+        // Native decoder output first: no per-frame YUV→BGRA conversion.
+        kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_32BGRA],
     ]
     let requiredPixelBufferAttributesForRenderContext: [String: any Sendable] = [
         kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
     ]
     private let ciContext = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any])
-    private let queue = DispatchQueue(label: "BaseStudio.PreviewCompositor", qos: .userInteractive)
+    // Concurrent: the player asks for frames ahead; CIContext is thread-safe.
+    private let queue = DispatchQueue(label: "BaseStudio.PreviewCompositor", qos: .userInteractive, attributes: .concurrent)
 
     func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {}
 
     func startRequest(_ request: AVAsynchronousVideoCompositionRequest) {
-        queue.async { [ciContext] in
+        queue.async { [ciContext] in autoreleasepool {
+            // Per-frame pool: CIImage graphs and decoded frames are
+            // autoreleased (export once grew to 40 GB without one).
             guard let ins = request.videoCompositionInstruction as? PreviewInstruction,
                   let out = request.renderContext.newPixelBuffer() else {
                 request.finish(with: NSError(domain: "BaseStudio.Preview", code: 1))
@@ -166,6 +170,6 @@ final class PreviewCompositor: NSObject, AVVideoCompositing {
                 .transformed(by: CGAffineTransform(scaleX: ins.scale, y: ins.scale))
             ciContext.render(image, to: out)
             request.finish(withComposedVideoFrame: out)
-        }
+        } }
     }
 }

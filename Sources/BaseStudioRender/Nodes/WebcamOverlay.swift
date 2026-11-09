@@ -47,9 +47,10 @@ public struct WebcamOverlay: VideoNode {
             .cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
 
         // 3. Shape mask — circle or rounded rect.
-        let mask = isRounded
-            ? roundedRectMask(size: size, corner: size * 0.20)
-            : circleMask(diameter: size)
+        // Mask and its shadow don't change per frame: build once.
+        let mask = RasterCache.image("cam-mask|\(size)|\(isRounded)") {
+            isRounded ? roundedRectMask(size: size, corner: size * 0.20) : circleMask(diameter: size)
+        }
         let masked = scaled.applyingFilter("CIBlendWithAlphaMask", parameters: [
             kCIInputBackgroundImageKey: CIImage(color: .clear)
                 .cropped(to: CGRect(x: 0, y: 0, width: size, height: size)),
@@ -68,12 +69,13 @@ public struct WebcamOverlay: VideoNode {
         let placed = masked.transformed(by: CGAffineTransform(translationX: pos.x, y: pos.y))
 
         // 5. Soft shadow under the circle.
-        let shadow = mask
-            .applyingGaussianBlur(sigma: 18)
-            .applyingFilter("CIColorMatrix", parameters: [
-                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.45),
-            ])
-            .transformed(by: CGAffineTransform(translationX: pos.x, y: pos.y - 6))
+        let shadow = RasterCache.image("cam-shadow|\(size)|\(isRounded)") {
+            mask.applyingGaussianBlur(sigma: 18)
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.45),
+                ])
+        }
+        .transformed(by: CGAffineTransform(translationX: pos.x, y: pos.y - 6))
 
         return placed.composited(over: shadow.composited(over: input))
             .cropped(to: input.extent)

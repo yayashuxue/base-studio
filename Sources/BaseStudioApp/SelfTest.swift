@@ -102,6 +102,23 @@ enum SelfTest {
         return Double(CommandLine.arguments[i + 1])
     }
 
+    /// `--selftest-cursor-tour`: during the take, move the pointer to the
+    /// screen's four corners and centre (CGWarpMouseCursorPosition, no
+    /// permission needed), 1 s each from second 1. After the take: the
+    /// recorded cursor positions there must match the targets, and frames of
+    /// the export at those moments are saved for a visual check.
+    private static var cursorTour: Bool { CommandLine.arguments.contains("--selftest-cursor-tour") }
+
+    /// Targets in global top-left points (CG space), inset from the edges.
+    @MainActor
+    static func cursorTargets() -> [CGPoint] {
+        let f = CGDisplayBounds(CGMainDisplayID())
+        let i: CGFloat = 40
+        return [CGPoint(x: f.minX + i, y: f.minY + i), CGPoint(x: f.maxX - i, y: f.minY + i),
+                CGPoint(x: f.maxX - i, y: f.maxY - i), CGPoint(x: f.minX + i, y: f.maxY - i),
+                CGPoint(x: f.midX, y: f.midY)]
+    }
+
     private static var recordSeconds: Double {
         if let i = CommandLine.arguments.firstIndex(of: "--selftest-seconds"),
            i + 1 < CommandLine.arguments.count, let v = Double(CommandLine.arguments[i + 1]) {
@@ -211,7 +228,20 @@ enum SelfTest {
             if CommandLine.arguments.contains("--selftest-camera-bubble"), let cam = session.webcamCaptureSession {
                 bubble.show(session: cam)
             }
-            if let at = pauseStopAt, at < recordSeconds {
+            var tourTimes: [CMTime] = []
+            if cursorTour {
+                // Runs alongside the take; positions held 1 s each.
+                let targets = Self.cursorTargets()
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                for p in targets {
+                    CGWarpMouseCursorPosition(p)
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    tourTimes.append(HostClock.now())          // mid-hold sample time
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                }
+                let left = recordSeconds - 1 - Double(targets.count)
+                if left > 0 { try await Task.sleep(nanoseconds: UInt64(left * 1_000_000_000)) }
+            } else if let at = pauseStopAt, at < recordSeconds {
                 try await Task.sleep(nanoseconds: UInt64(at * 1_000_000_000))
                 session.pause()
                 try await Task.sleep(nanoseconds: UInt64((recordSeconds - at) * 1_000_000_000))
@@ -282,6 +312,44 @@ enum SelfTest {
                 }
                 let expected = pauseStopAt ?? (recordSeconds - (pausePlan?.length ?? 0))
                 r.pass = r.pass && r.exportSec > max(1.0, expected - 1.5) && r.exportSec < expected + 3
+            }
+            if cursorTour {
+                // Recorded cursor (bottom-left points, as stored) vs target.
+                let meta = try? JSONDecoder().decode(RecordingMetadata.self, from: Data(contentsOf: bundle.metadataURL))
+                let targets = Self.cursorTargets()
+                let mainH = CGDisplayBounds(CGMainDisplayID()).height
+                var worst = 0.0
+                if let data = try? Data(contentsOf: bundle.cursorURL),
+                   let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let samples = raw["samples"] as? [[String: Any]], let meta {
+                    let pts: [(Double, Double, Double)] = samples.compactMap {
+                        guard let t = $0["t"] as? [String: Any], let v = t["value"] as? NSNumber,
+                              let ts = t["timescale"] as? NSNumber, let x = $0["x"] as? Double, let y = $0["y"] as? Double
+                        else { return nil }
+                        return (v.doubleValue / ts.doubleValue, x, y)
+                    }
+                    for (target, at) in zip(targets, tourTimes) {
+                        guard let s = pts.min(by: { abs($0.0 - at.seconds) < abs($1.0 - at.seconds) }) else { worst = .infinity; continue }
+                        let d = hypot(s.1 - Double(target.x), s.2 - Double(mainH - target.y))
+                        worst = max(worst, d)
+                        r.cursorTour.append(String(format: "target (%.0f,%.0f) recorded (%.0f,%.0f) @%.2fs",
+                            target.x, mainH - target.y, s.1, s.2, at.seconds - meta.firstVideoPTS.cmTime.seconds))
+                    }
+                } else { worst = .infinity }
+                r.cursorWorstPt = worst
+                r.pass = r.pass && worst < 3 && tourTimes.count == targets.count
+                // Export frames at each hold, for the visual check.
+                if let meta, FileManager.default.fileExists(atPath: bundle.url.appendingPathComponent("selftest-export.mp4").path) {
+                    let gen = AVAssetImageGenerator(asset: AVURLAsset(url: bundle.url.appendingPathComponent("selftest-export.mp4")))
+                    gen.requestedTimeToleranceBefore = .zero; gen.requestedTimeToleranceAfter = .zero
+                    for (k, at) in tourTimes.enumerated() {
+                        let t = CMTime(seconds: at.seconds - meta.firstVideoPTS.cmTime.seconds, preferredTimescale: 600)
+                        if let cg = try? await gen.image(at: t).image,
+                           let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) {
+                            try? png.write(to: bundle.url.appendingPathComponent("cursor-tour-\(k + 1).png"))
+                        }
+                    }
+                }
             }
             if pauseStopAt != nil || pausePlan != nil {
                 // Nothing from the pause may be in ANY file: screen picture,
@@ -675,6 +743,8 @@ enum SelfTest {
         var exportSec: Double = 0
         var pauses = 0
         var framesInPause = -1
+        var cursorTour: [String] = []
+        var cursorWorstPt: Double = -1
         var samplesInPause: [String: Int] = [:]
         var projectCuts = -1
         var exportError: String?
