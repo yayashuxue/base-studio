@@ -120,8 +120,9 @@ final class RecordingPanel {
         paused.alignment = .centerY
         let fit = paused.fittingSize
         paused.frame = NSRect(x: (w - fit.width) / 2, y: y, width: fit.width, height: 14)
-        paused.toolTip = cameraOn || micOn
-            ? "Paused — nothing is being recorded. Camera and microphone stay on." : "Paused — nothing is being recorded."
+        let stillOn = [cameraOn ? "Camera" : nil, micOn ? "Microphone" : nil].compactMap { $0 }
+        paused.toolTip = "Paused — nothing is being recorded."
+            + (stillOn.isEmpty ? "" : " \(stillOn.joined(separator: " and ")) \(stillOn.count == 1 ? "stays" : "stay") on.")
         paused.isHidden = true
         bg.addSubview(paused)
         self.pausedRow = paused

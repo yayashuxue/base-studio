@@ -179,7 +179,7 @@ public final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     ) {
         guard sampleBuffer.isValid, let audioInput, audioInput.isReadyForMoreMediaData else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        if let pauseState, pauseState.covers(pts) { return }
+        if let pauseState, pauseState.overlaps(pts, duration: CMSampleBufferGetDuration(sampleBuffer)) { return }
         if firstPTS == nil {
             firstPTS = pts
             writer?.startSession(atSourceTime: pts)

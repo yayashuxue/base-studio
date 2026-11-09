@@ -210,10 +210,10 @@ public final class RecordingSession {
         // common "crashed halfway through" path.
         guard state == .recording else { throw RecordingSessionError.notRunning }
         state = .finalizing
-        // Close a pause still open at Stop; the intervals go into metadata.
-        let pauses = pauseState.finish().map {
-            PauseInterval(start: TimePoint($0.start), end: TimePoint($0.end))
-        }
+        // A pause still open at Stop stays open while the recorders stop and
+        // drain, so nothing is written on the way out; it is closed (for
+        // metadata) only afterwards, at the moment Stop was pressed.
+        let stopPressedAt = HostClock.now()
         defer { state = .idle }
         guard let bundle else { throw RecordingSessionError.missingBundle }
 
@@ -289,6 +289,9 @@ public final class RecordingSession {
             $0 == .zero ? nil : TimePoint($0)
         }
 
+        let pauses = pauseState.finish(at: stopPressedAt).map {
+            PauseInterval(start: TimePoint($0.start), end: TimePoint($0.end))
+        }
         let meta = RecordingMetadata(
             displayID: screenResult.displayID,
             widthPx: screenResult.widthPx,

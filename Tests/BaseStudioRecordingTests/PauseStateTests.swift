@@ -25,6 +25,23 @@ final class PauseStateTests: XCTestCase {
         XCTAssertEqual(all.map { $0.end.seconds }, [13, 25])
     }
 
+    func testAudioBufferCrossingAPauseIsDropped() {
+        let p = PauseState()
+        let d = CMTime(seconds: 0.02, preferredTimescale: 48_000)
+        p.pause(at: t(10))
+        XCTAssertFalse(p.overlaps(t(9.97), duration: d))   // ends before the pause
+        XCTAssertTrue(p.overlaps(t(9.99), duration: d))    // runs into the open pause
+        XCTAssertTrue(p.overlaps(t(11), duration: d))
+        p.resume(at: t(13))
+        XCTAssertTrue(p.overlaps(t(9.99), duration: d))    // still crosses the closed pause start
+        XCTAssertTrue(p.overlaps(t(12.99), duration: d))   // starts inside, ends after
+        XCTAssertFalse(p.overlaps(t(13), duration: d))     // starts at resume
+        XCTAssertFalse(p.overlaps(t(13.5), duration: .invalid))
+        XCTAssertEqual(p.openPauseStart, nil)
+        p.pause(at: t(20))
+        XCTAssertEqual(p.openPauseStart?.seconds, 20)
+    }
+
     func testPausesBecomeCutsFromFirstFrame() {
         let meta = RecordingMetadata(
             displayID: 1, widthPx: 100, heightPx: 100, pointScale: 1,

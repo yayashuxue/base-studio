@@ -94,6 +94,14 @@ enum SelfTest {
         return (a, b)
     }
 
+    /// `--selftest-pause-stop A`: pause A s in and Stop while still paused.
+    /// Checks nothing after A was written (screen frames, audio) on the way out.
+    private static var pauseStopAt: Double? {
+        guard let i = CommandLine.arguments.firstIndex(of: "--selftest-pause-stop"),
+              i + 1 < CommandLine.arguments.count else { return nil }
+        return Double(CommandLine.arguments[i + 1])
+    }
+
     private static var recordSeconds: Double {
         if let i = CommandLine.arguments.firstIndex(of: "--selftest-seconds"),
            i + 1 < CommandLine.arguments.count, let v = Double(CommandLine.arguments[i + 1]) {
@@ -203,7 +211,11 @@ enum SelfTest {
             if CommandLine.arguments.contains("--selftest-camera-bubble"), let cam = session.webcamCaptureSession {
                 bubble.show(session: cam)
             }
-            if let plan = pausePlan, plan.at + plan.length < recordSeconds {
+            if let at = pauseStopAt, at < recordSeconds {
+                try await Task.sleep(nanoseconds: UInt64(at * 1_000_000_000))
+                session.pause()
+                try await Task.sleep(nanoseconds: UInt64((recordSeconds - at) * 1_000_000_000))
+            } else if let plan = pausePlan, plan.at + plan.length < recordSeconds {
                 try await Task.sleep(nanoseconds: UInt64(plan.at * 1_000_000_000))
                 session.pause()
                 try await Task.sleep(nanoseconds: UInt64(plan.length * 1_000_000_000))
@@ -264,10 +276,21 @@ enum SelfTest {
                 } catch {
                     r.exportError = "\(error)"
                 }
-                let expected = recordSeconds - (pausePlan?.length ?? 0)
+                let expected = pauseStopAt ?? (recordSeconds - (pausePlan?.length ?? 0))
                 r.pass = r.pass && r.exportSec > max(1.0, expected - 1.5) && r.exportSec < expected + 3
             }
-            if pausePlan != nil {
+            if let at = pauseStopAt {
+                // Stopped while paused: the take ends at the pause; nothing
+                // after it reached any file.
+                let meta = try? JSONDecoder().decode(RecordingMetadata.self, from: Data(contentsOf: bundle.metadataURL))
+                r.pauses = meta?.pauses?.count ?? 0
+                let pauseFile = meta?.pauseCuts.first?.startSec ?? at
+                r.framesInPause = await Self.framesBetween(bundle.screenURL, pauseFile + 0.02, 1e9)
+                let micEnd = (try? await AVURLAsset(url: bundle.url.appendingPathComponent("mic.m4a")).load(.duration).seconds) ?? 0
+                let micStart = meta?.micFirstPTS.map { CMTimeSubtract($0.cmTime, meta!.firstVideoPTS.cmTime).seconds } ?? 0
+                r.audioPastPause = max(0, micStart + micEnd - pauseFile)
+                r.pass = r.pass && r.pauses == 1 && r.framesInPause == 0 && r.audioPastPause < 0.05
+            } else if pausePlan != nil {
                 // Nothing written while paused: no screen frame inside the pause.
                 let meta = try? JSONDecoder().decode(RecordingMetadata.self, from: Data(contentsOf: bundle.metadataURL))
                 r.pauses = meta?.pauses?.count ?? 0
@@ -588,6 +611,7 @@ enum SelfTest {
         var exportSec: Double = 0
         var pauses = 0
         var framesInPause = -1
+        var audioPastPause: Double = 0
         var exportError: String?
         var webcamTrack = false
         var micTrack = false

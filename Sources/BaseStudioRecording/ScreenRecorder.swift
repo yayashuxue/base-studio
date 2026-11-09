@@ -801,7 +801,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // screen locked after 10 s had its last frame at 10 s), so the
         // timeline and the closing frame are anchored to now, on the same host
         // clock SCK stamps frames with.
-        let stopHostTime = CMClockGetTime(CMClockGetHostTimeClock())
+        // Stopped while paused: the take ended when the pause began — nothing
+        // after that may be written, not even the closing frame.
+        // The closing frame sits one frame before the end, so the track ends
+        // exactly at the pause start.
+        let stopHostTime = pauseState?.openPauseStart.map { CMTimeSubtract($0, CMTime(value: 1, timescale: CMTimeScale(fps))) }
+            ?? CMClockGetTime(CMClockGetHostTimeClock())
         if let last = lastPTS, CMTimeCompare(stopHostTime, last) > 0 { lastPTS = stopHostTime }
 
         var stopCaptureError: Error?
@@ -910,7 +915,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             _activity.lastAudio = now; _activity.audioCallbacks += 1
         }
         activityLock.unlock()
-        if let pauseState, pauseState.covers(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) { return }
+        if let pauseState, pauseState.overlaps(CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                                               duration: CMSampleBufferGetDuration(sampleBuffer)) { return }
         if type == .screen {
             if let quiet = injectSilenceAfter, let origin = firstPTS,
                CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), origin).seconds > quiet {

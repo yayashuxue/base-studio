@@ -34,6 +34,21 @@ public final class PauseState: @unchecked Sendable {
         }
     }
 
+    /// Whether a sample lasting [pts, pts + duration) touches a pause. Audio
+    /// buffers have length: one starting just before the pause and running
+    /// into it still carries paused sound, so it is dropped whole.
+    public func overlaps(_ pts: CMTime, duration: CMTime) -> Bool {
+        let d = duration.isValid && duration.seconds > 0 ? duration : .zero
+        let end = CMTimeAdd(pts, d)
+        return lock.withLock {
+            if let s = openSince, CMTimeCompare(end, s) > 0 || CMTimeCompare(pts, s) >= 0 { return true }
+            return closed.contains { CMTimeCompare(pts, $0.end) < 0 && (CMTimeCompare(end, $0.start) > 0 || CMTimeCompare(pts, $0.start) >= 0) }
+        }
+    }
+
+    /// Start of the pause in progress, if any.
+    public var openPauseStart: CMTime? { lock.withLock { openSince } }
+
     /// Close an open pause at `t` and return all intervals.
     public func finish(at t: CMTime = HostClock.now()) -> [(start: CMTime, end: CMTime)] {
         resume(at: t)
