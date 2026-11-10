@@ -77,9 +77,15 @@ private final class FileSink {
     init() {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
-        directoryURL = library.appendingPathComponent("Logs/BaseStudio", isDirectory: true)
+        // Test runs log to their own folder: they used to write into the app's
+        // log, and a test's injected "-3817 user stopped the stream" read like
+        // something the user did.
+        let folder = Self.isTestRun ? "Logs/BaseStudio-tests" : "Logs/BaseStudio"
+        directoryURL = library.appendingPathComponent(folder, isDirectory: true)
         try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
     }
+
+    static let isTestRun = NSClassFromString("XCTestCase") != nil
 
     func currentFileURL() -> URL {
         directoryURL.appendingPathComponent("base-studio-\(today()).log")

@@ -102,19 +102,23 @@ public struct BackgroundCompose: VideoNode {
             kCIInputMaskImageKey: mask,
         ])
 
-        // 4. Soft drop shadow under the masked input.
-        let shadow = mask
-            .applyingGaussianBlur(sigma: Double(shadowR))
-            .applyingFilter("CIColorMatrix", parameters: [
-                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: shadowOp),
-            ])
-            .applyingFilter("CIMultiplyCompositing", parameters: [
-                kCIInputBackgroundImageKey: CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1))
-                    .cropped(to: canvasRect),
-            ])
-
-        // 5. Compose: bg + shadow + maskedInput.
-        let withShadow = shadow.composited(over: bg)
+        // 4–5. Background + soft drop shadow: identical every frame for the
+        // same settings, so rasterized once (the blur was ~60 ms a frame).
+        let bgKey = ctx.backgroundImage.map { "img:\(ObjectIdentifier($0).hashValue)" }
+            ?? "grad:\(params["bgStyle"]?.asScalar ?? 0):\(String(describing: params["bgTop"]?.asColor)):\(String(describing: params["bgBottom"]?.asColor))"
+        let backdropKey = "bg|\(bgKey)|\(placedRect)|\(corner)|\(shadowR)|\(shadowOp)|\(canvasRect)"
+        let withShadow = RasterCache.image(backdropKey) {
+            let shadow = mask
+                .applyingGaussianBlur(sigma: Double(shadowR))
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: shadowOp),
+                ])
+                .applyingFilter("CIMultiplyCompositing", parameters: [
+                    kCIInputBackgroundImageKey: CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1))
+                        .cropped(to: canvasRect),
+                ])
+            return shadow.composited(over: bg).cropped(to: canvasRect)
+        }
         let composited = maskedInput.composited(over: withShadow)
 
         // 6. Hairline edge on the screen card. On the light Porcelain default a
@@ -124,10 +128,10 @@ public struct BackgroundCompose: VideoNode {
         let borderOp = CGFloat(params["borderOpacity"]?.asScalar ?? 0.12)
         let result: CIImage
         if borderOp > 0.001 {
-            let stroke = strokeImage(
-                rect: placedRect, radius: corner, canvas: canvasRect,
-                lineWidth: 2, alpha: borderOp
-            )
+            // Drawn on the CPU at full canvas size — once, not every frame.
+            let stroke = RasterCache.image("stroke|\(placedRect)|\(corner)|\(canvasRect)|\(borderOp)") {
+                strokeImage(rect: placedRect, radius: corner, canvas: canvasRect, lineWidth: 2, alpha: borderOp)
+            }
             result = stroke.composited(over: composited)
         } else {
             result = composited

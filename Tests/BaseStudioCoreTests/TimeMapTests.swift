@@ -195,3 +195,32 @@ final class TimeMapTests: XCTestCase {
         )
     }
 }
+
+/// Pauses become cuts: nothing was recorded there, the timeline closes up.
+final class TimeMapCutTests: XCTestCase {
+    func testCutClosesTheTimeline() {
+        // 10 s take, paused 3–6 s.
+        let m = TimeMap.make(trimInSec: 0, trimOutSec: 10, speedRegions: [], cuts: [(3, 6)])
+        XCTAssertEqual(m.timelineDurationSec, 7, accuracy: 1e-9)
+        XCTAssertEqual(m.sourceSec(at: 2.9), 2.9, accuracy: 1e-9)    // before the cut
+        XCTAssertEqual(m.sourceSec(at: 2.999), 2.999, accuracy: 1e-9)
+        XCTAssertEqual(m.sourceSec(at: 3.0), 6.0, accuracy: 1e-9)    // on it: where recording resumed
+        XCTAssertEqual(m.sourceSec(at: 3.5), 6.5, accuracy: 1e-9)    // after
+        XCTAssertEqual(m.sourceSec(at: 7.0), 10.0, accuracy: 1e-9)   // end of take
+        XCTAssertEqual(m.timelineSec(atSource: 6.5) ?? -1, 3.5, accuracy: 1e-9)
+        XCTAssertNil(m.timelineSec(atSource: 4))
+        XCTAssertFalse(m.isIdentity)
+    }
+
+    func testCutInsideSpeedRegionKeepsSpeed() {
+        // 2× over 2–8 s, cut 4–5 s: remaining 2–4 and 5–8 at 2×.
+        let m = TimeMap.make(trimInSec: 0, trimOutSec: 10, speedRegions: [(2, 8, 2)], cuts: [(4, 5)])
+        XCTAssertEqual(m.timelineDurationSec, 2 + 1 + 1.5 + 2, accuracy: 1e-9)
+        XCTAssertEqual(m.sourceSec(at: 3.0), 5.0, accuracy: 1e-9)   // boundary → resume at 5
+        XCTAssertEqual(m.sourceSec(at: 3.5), 6.0, accuracy: 1e-9)
+    }
+
+    func testNoCutsIsIdentity() {
+        XCTAssertTrue(TimeMap.make(trimInSec: 1, trimOutSec: 9, speedRegions: []).isIdentity)
+    }
+}

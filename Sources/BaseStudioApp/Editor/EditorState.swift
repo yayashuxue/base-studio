@@ -16,6 +16,7 @@ final class EditorState: ObservableObject {
         didSet {
             cachedTimeMap = nil
             cachedSourcesByID = nil
+            previewAudio.stale = true
             // Reload disk-backed bg only when filename changes — otherwise
             // playhead scrubbing keeps re-decoding the PNG.
             if oldValue.backgroundImageRel != project.backgroundImageRel {
@@ -54,7 +55,30 @@ final class EditorState: ObservableObject {
     /// `renderPending` and the running render re-schedules itself.
     private var renderInFlight = false
     private var renderPending = false
-    private var playTimer: Timer?
+    /// The take's sound while previewing (same sources and TimeMap as
+    /// export); its clock drives the playhead — see PreviewClock.
+    private lazy var previewAudio: PlayerPreviewAudio = {
+        let p = PlayerPreviewAudio { [weak self] in await self?.makePreviewAudioItem() }
+        p.onItemFailed = { [weak self] _ in self?.playerDrawsPicture = false }
+        return p
+    }()
+    private lazy var clock: PreviewClock = {
+        let c = PreviewClock(output: previewAudio)
+        c.onTick = { [weak self] sec, ended in
+            guard let self else { return }
+            if ended {
+                self.isPlaying = false
+                self.playheadSec = 0
+                self.scheduleRender()
+            } else {
+                self.playheadSec = sec
+                // While playing, the player draws the picture (PlayerLayerView);
+                // rendering here too only competed with it for the CPU.
+                if !self.playerDrawsPicture { self.scheduleRender() }
+            }
+        }
+        return c
+    }()
     private var saveDebounce: Timer?
 
     // Undo/redo stacks of Project snapshots (immutable Codable structs).
@@ -355,8 +379,35 @@ final class EditorState: ObservableObject {
 
     func setPlayhead(_ sec: Double) {
         playheadSec = max(0, min(timelineDurationSec, sec))
+        clock.seek(to: playheadSec)
+        // Scrubbing: draw quick, small frames while the playhead moves and a
+        // full-quality one once it rests (julie: dragging the bar lagged).
+        if !isPlaying { quickThenFullStill() } else { scheduleRender() }
+    }
+
+    /// A small still now, the full-quality one right after. Used for
+    /// scrubbing, opening a recording and pausing — on a busy Mac a
+    /// full-size still took seconds ("Loading preview" for ages, julie 11/10).
+    func quickThenFullStill() {
+        stillScale = motionScale
+        settleTimer?.invalidate()
+        settleTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                // Playing again: the player draws; no full-size still.
+                guard let self, !self.isPlaying else { return }
+                self.stillScale = 1
+                self.scheduleRender()
+            }
+        }
         scheduleRender()
     }
+
+    /// Timeline time and scale of the still currently shown (tests, diagnostics).
+    private(set) var renderedImagePTS: CMTime?
+    private(set) var renderedImageScale: Double = 1
+    /// Render scale for the still preview: < 1 while scrubbing.
+    private var stillScale: Double = 1
+    private var settleTimer: Timer?
 
     // MARK: - playback
 
@@ -367,29 +418,73 @@ final class EditorState: ObservableObject {
     func play() {
         guard !isPlaying else { return }
         isPlaying = true
-        playTimer?.invalidate()
+        settleTimer?.invalidate()
+        stillScale = 1
         // 24fps for editor preview: per-frame HEVC decode + pipeline still
-        // routinely exceeds 33ms on 4K screen recordings, and a 30fps timer
-        // just queues up renders the playback can't catch. Export still
-        // runs at 60fps; this is a UI-only knob.
-        let interval: TimeInterval = 1.0 / 24.0
-        playTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.playheadSec += interval
-                if self.playheadSec >= self.timelineDurationSec {
-                    self.pause()
-                    self.playheadSec = 0
-                }
-                self.scheduleRender()
-            }
-        }
+        // routinely exceeds 33ms on 4K screen recordings. Export still runs
+        // at 60fps; this is a UI-only knob (PreviewClock's interval).
+        clock.play(from: playheadSec, duration: timelineDurationSec)
     }
 
     func pause() {
         isPlaying = false
-        playTimer?.invalidate()
-        playTimer = nil
+        clock.pause()
+        quickThenFullStill()   // a still at the stop point, quick first
+    }
+
+    /// Which audio the preview plays — the export's Audio choice, so what
+    /// you hear while editing is what the file will contain.
+    var previewAudioMode: ExportPipeline.AudioMode = .both {
+        didSet {
+            guard previewAudioMode != oldValue else { return }
+            previewAudio.stale = true
+            if isPlaying { pause(); play() }   // rebuild with the new sources now
+        }
+    }
+
+    /// Preview quality while playing / scrubbing: Performance draws at 0.4×
+    /// (smooth on a busy Mac, visibly soft); Full resolution draws at 1×.
+    /// Paused frames are always full resolution. Remembered across launches.
+    @Published var previewFullResolution: Bool = UserDefaults.standard.bool(forKey: "PreviewFullResolution") {
+        didSet {
+            guard previewFullResolution != oldValue else { return }
+            UserDefaults.standard.set(previewFullResolution, forKey: "PreviewFullResolution")
+            previewAudio.stale = true
+            if isPlaying { pause(); play() }
+        }
+    }
+    private var motionScale: Double { previewFullResolution ? 1 : 0.4 }
+
+    /// The player that shows playback (picture and sound).
+    var previewPlayer: AVPlayer { previewAudio.player }
+    /// true when the current playback item renders the picture itself.
+    @Published private(set) var playerDrawsPicture = false
+
+    private func makePreviewAudioItem() async -> AVPlayerItem? {
+        let sources = await AudioPlan.sources(project: project, bundleURL: bundleURL, meta: recordingMeta,
+                                              mode: previewAudioMode)
+        // Picture + sound through PreviewPlayback (off-main, hardware decode,
+        // one clock). Falls back to sound only, with the old per-frame render.
+        do {
+            let ctx = PreviewPlayback.Context(project: project, timeMap: timeMap, primary: primarySource,
+                                              sidecars: sidecars, backgroundImage: backgroundImageCache)
+            let item = try await PreviewPlayback.makeItem(ctx, bundleURL: bundleURL, audio: sources, scale: motionScale)
+            playerDrawsPicture = item.videoComposition != nil
+            return item
+        } catch {
+            BSLog.warn("preview playback unavailable (\(error)); falling back to per-frame preview")
+            playerDrawsPicture = false
+        }
+        do {
+            guard let built = try await PreviewAudio.build(sources: sources, timeMap: timeMap) else { return nil }
+            let item = AVPlayerItem(asset: built.composition)
+            item.audioMix = built.audioMix
+            item.audioTimePitchAlgorithm = .spectral
+            return item
+        } catch {
+            BSLog.warn("preview audio unavailable (\(error)); playing picture only")
+            return nil
+        }
     }
 
     // MARK: - rendering
@@ -408,11 +503,14 @@ final class EditorState: ObservableObject {
         renderPending = false
         let snapshot = project
         let pts = playheadPTS
+        let scale = stillScale
         Task { [weak self] in
             guard let self else { return }
-            let image = await self.render(project: snapshot, at: pts)
+            let image = await self.renderInternal(project: snapshot, at: pts, scale: scale)
             await MainActor.run {
                 self.renderedImage = image
+                self.renderedImagePTS = image == nil ? nil : pts
+                self.renderedImageScale = scale
                 self.renderInFlight = false
                 if self.renderPending {
                     self.runRender()
@@ -421,11 +519,7 @@ final class EditorState: ObservableObject {
         }
     }
 
-    private nonisolated func render(project: Project, at pts: CMTime) async -> NSImage? {
-        await renderInternal(project: project, at: pts)
-    }
-
-    private func renderInternal(project: Project, at pts: CMTime) async -> NSImage? {
+    func renderInternal(project: Project, at pts: CMTime, scale: Double = 1) async -> NSImage? {
         guard let primaryImg = await sourceFrameAsync(primarySource.id, timelinePTS: pts) else {
             return nil
         }
@@ -435,9 +529,10 @@ final class EditorState: ObservableObject {
             ?? primarySource.firstPTS.cmTime
         let sidecarOffset = primarySource.fileTime(at: segIn)
 
-        let inputs = Renderer.Inputs(
+        var inputs = Renderer.Inputs(
             project: project,
             pts: pts,
+            sourceTime: sourceTime(at: pts),
             sidecarOffset: sidecarOffset,
             primarySource: primarySource,
             primaryFrame: primaryImg,
@@ -450,9 +545,10 @@ final class EditorState: ObservableObject {
                 return self.syncSourceFrame(sourceID, timelinePTS: t)
             }
         )
+        inputs.renderScale = scale
         let output = Renderer.render(inputs)
-        let cw = project.canvas.widthPx
-        let ch = project.canvas.heightPx
+        let cw = Int((Double(project.canvas.widthPx) * scale).rounded())
+        let ch = Int((Double(project.canvas.heightPx) * scale).rounded())
         guard let cg = ciContext.createCGImage(
             output, from: CGRect(x: 0, y: 0, width: cw, height: ch)
         ) else { return nil }
@@ -464,11 +560,17 @@ final class EditorState: ObservableObject {
     /// Resolve the on-disk file-time at which to seek `source` for a given
     /// timeline PTS. Primary honors trim + speed-ramps; secondary sources
     /// (e.g. webcam) share the host clock and only get the host→file shift.
-    private func seekTime(forSource source: SourceClip, timelinePTS: CMTime) -> CMTime {
-        let hostPTS = source.id == primarySource.id
-            ? primarySourcePTS(at: timelinePTS)
-            : CMTimeAdd(primarySource.firstPTS.cmTime, timelinePTS)
-        return source.fileTime(at: hostPTS)
+    /// Every source is read at the same host time, mapped through the
+    /// TimeMap (trim, cuts, speed) — as export does. The webcam used to be
+    /// read at first frame + timeline time, ignoring trim and cuts.
+    func seekTime(forSource source: SourceClip, timelinePTS: CMTime) -> CMTime {
+        source.fileTime(at: primarySourcePTS(at: timelinePTS))
+    }
+
+    /// Source time (seconds since trim-in) shown at timeline `pts`; cursor
+    /// streams and zoom regions are read at this time.
+    func sourceTime(at pts: CMTime) -> CMTime {
+        CMTime(seconds: timeMap.sourceSec(at: pts.seconds), preferredTimescale: 6000)
     }
 
     /// Resolve the seek target for `sourceID` and return a cache hit if we

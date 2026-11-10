@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 
 /// On-disk layout of a recording. The PRD calls for a `.basestudio` directory bundle
@@ -25,13 +26,26 @@ public struct ProjectBundle {
         self.url = url
     }
 
+    /// Always a NEW, empty bundle: if `<name>.basestudio` exists (two takes
+    /// in the same second, a re-run self-test) the next free `<name>-2`,
+    /// `<name>-3`, … is used. An existing recording is never reused or
+    /// overwritten — a re-run once replaced the only copy of a 330 s take.
     public static func create(in directory: URL, name: String) throws -> ProjectBundle {
-        let bundleURL = directory
-            .appendingPathComponent("\(name).basestudio", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: bundleURL, withIntermediateDirectories: true
-        )
-        return ProjectBundle(url: bundleURL)
+        let fm = FileManager.default
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        for n in 1...10_000 {
+            let stem = n == 1 ? name : "\(name)-\(n)"
+            let bundleURL = directory.appendingPathComponent("\(stem).basestudio", isDirectory: true)
+            do {
+                // Without intermediates, createDirectory fails if it exists —
+                // check and claim in one step, no race with a second recorder.
+                try fm.createDirectory(at: bundleURL, withIntermediateDirectories: false)
+                return ProjectBundle(url: bundleURL)
+            } catch CocoaError.fileWriteFileExists {
+                continue
+            }
+        }
+        throw CocoaError(.fileWriteFileExists)
     }
 }
 
@@ -83,6 +97,19 @@ public struct RecordingMetadata: Codable {
     /// fields (widthPx/heightPx) — keeping audio cleanly typed.
     public let micFirstPTS: TimePoint?
 
+    /// Pixels of the recorded frame per display point — what cursor/click
+    /// coordinates (points) must be multiplied by. Taken from the frame
+    /// itself, not `pointScale`: takes recorded at 1× on a 2× Retina display
+    /// (1512 px wide, 1512 pt) stored pointScale 2, which put the cursor
+    /// at twice its position — off the frame, so it never showed.
+    /// Host-clock intervals during which the take was paused: nothing was
+    /// recorded there. Optional for older bundles.
+    public var pauses: [PauseInterval]?
+
+    public var pixelsPerPoint: Double {
+        displayWidthPt > 0 ? Double(widthPx) / displayWidthPt : pointScale
+    }
+
     public init(
         displayID: UInt32,
         widthPx: Int, heightPx: Int,
@@ -92,7 +119,8 @@ public struct RecordingMetadata: Codable {
         firstVideoPTS: TimePoint,
         lastVideoPTS: TimePoint,
         sources: [String: SourceMediaInfo]? = nil,
-        micFirstPTS: TimePoint? = nil
+        micFirstPTS: TimePoint? = nil,
+        pauses: [PauseInterval]? = nil
     ) {
         self.displayID = displayID
         self.widthPx = widthPx
@@ -106,12 +134,13 @@ public struct RecordingMetadata: Codable {
         self.lastVideoPTS = lastVideoPTS
         self.sources = sources
         self.micFirstPTS = micFirstPTS
+        self.pauses = pauses
     }
 
     private enum CodingKeys: String, CodingKey {
         case displayID, widthPx, heightPx, pointScale
         case displayOriginXPt, displayOriginYPt, displayWidthPt, displayHeightPt
-        case firstVideoPTS, lastVideoPTS, sources, micFirstPTS
+        case firstVideoPTS, lastVideoPTS, sources, micFirstPTS, pauses
     }
 
     public init(from decoder: Decoder) throws {
@@ -128,5 +157,21 @@ public struct RecordingMetadata: Codable {
         lastVideoPTS = try c.decode(TimePoint.self, forKey: .lastVideoPTS)
         sources = try? c.decode([String: SourceMediaInfo].self, forKey: .sources)
         micFirstPTS = try? c.decode(TimePoint.self, forKey: .micFirstPTS)
+        pauses = try? c.decode([PauseInterval].self, forKey: .pauses)
     }
+
+    /// Pauses as cuts in seconds from the screen's first frame.
+    public var pauseCuts: [SourceCut] {
+        let origin = firstVideoPTS.cmTime
+        return (pauses ?? []).map {
+            SourceCut(startSec: CMTimeSubtract($0.start.cmTime, origin).seconds,
+                      endSec: CMTimeSubtract($0.end.cmTime, origin).seconds)
+        }
+    }
+}
+
+public struct PauseInterval: Codable, Sendable, Equatable {
+    public var start: TimePoint
+    public var end: TimePoint
+    public init(start: TimePoint, end: TimePoint) { self.start = start; self.end = end }
 }

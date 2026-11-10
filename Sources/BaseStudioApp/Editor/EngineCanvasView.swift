@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import SwiftUI
 
@@ -10,7 +11,9 @@ struct EngineCanvasView: View {
     var body: some View {
         ZStack {
             Color.black
-            if let img = state.renderedImage {
+            if state.isPlaying && state.playerDrawsPicture {
+                PlayerLayerView(player: state.previewPlayer)
+            } else if let img = state.renderedImage {
                 Image(nsImage: img)
                     .resizable()
                     .interpolation(.medium)
@@ -38,7 +41,24 @@ struct EngineCanvasView: View {
                 }
             }
         }
-        .onAppear { state.scheduleRender() }
+        .onAppear { state.quickThenFullStill() }
+    }
+}
+
+/// Shows the preview player's picture (aspect-fit, like the still image).
+struct PlayerLayerView: NSViewRepresentable {
+    let player: AVPlayer
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        v.wantsLayer = true
+        let layer = AVPlayerLayer(player: player)
+        layer.videoGravity = .resizeAspect
+        layer.backgroundColor = NSColor.black.cgColor
+        v.layer = layer
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView.layer as? AVPlayerLayer)?.player = player
     }
 }
 
@@ -73,6 +93,15 @@ struct ScrubberView: View {
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 56)
+
+            Picker("", selection: $state.previewFullResolution) {
+                Text("Performance").tag(false)
+                Text("Full resolution").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Preview quality while playing. Export is always full resolution.")
         }
     }
 }

@@ -367,6 +367,12 @@ struct HomeView: View {
                 title: "Webcam", systemImage: "person.crop.circle.fill",
                 isOn: $vm.includeWebcam
             )
+            if vm.includeWebcam {
+                optionPill(
+                    title: "Camera preview", systemImage: "eye.fill",
+                    isOn: $vm.showCameraWhileRecording
+                )
+            }
             optionPill(
                 title: "System audio", systemImage: "speaker.wave.2.fill",
                 isOn: $vm.includeSystemAudio
@@ -374,10 +380,6 @@ struct HomeView: View {
             optionPill(
                 title: "Microphone", systemImage: "mic.fill",
                 isOn: $vm.includeMic
-            )
-            optionPill(
-                title: "Stop dock", systemImage: "stop.circle.fill",
-                isOn: $vm.showFloatingPanel
             )
             Spacer()
         }

@@ -7,7 +7,8 @@ final class BSLogTests: XCTestCase {
         let dir = BSLog.logDirectoryURL.path
         // The file sink falls back to NSHomeDirectory()/Library if the system
         // can't resolve the user's library; both forms must end in Logs/BaseStudio.
-        XCTAssertTrue(dir.hasSuffix("Library/Logs/BaseStudio"), "got \(dir)")
+        // Under XCTest the logger uses its own folder (never the app's log).
+        XCTAssertTrue(dir.hasSuffix("Library/Logs/BaseStudio-tests"), "got \(dir)")
     }
 
     func testCurrentLogFilePathFormat() {

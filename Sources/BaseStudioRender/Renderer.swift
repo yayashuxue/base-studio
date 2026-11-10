@@ -10,7 +10,11 @@ public enum Renderer {
     public struct Inputs {
         public let project: Project
         public let pts: CMTime                  // timeline time of this frame
-        public let sidecarOffset: CMTime        // streamTime = pts + offset (used for trim)
+        /// Source time of this frame, seconds since trim-in. Differs from
+        /// `pts` once cuts or speed regions remap the timeline; cursor
+        /// streams and zoom regions live in source time.
+        public let sourceTime: CMTime
+        public let sidecarOffset: CMTime        // streamTime = sourceTime + offset (used for trim)
         public let primarySource: SourceClip
         public let primaryFrame: CIImage
         public let sidecars: SidecarStreams
@@ -18,10 +22,15 @@ public enum Renderer {
         public let ciContext: CIContext
         public let backgroundImage: CIImage?
         public let frameProvider: (String, CMTime) -> CIImage?
+        /// < 1 renders the whole frame at that size (preview): source frames,
+        /// canvas and pixel-sized params are scaled, so every filter runs on
+        /// fewer pixels. Output extent = canvas × renderScale.
+        public var renderScale: Double = 1
 
         public init(
             project: Project,
             pts: CMTime,
+            sourceTime: CMTime? = nil,
             sidecarOffset: CMTime = .zero,
             primarySource: SourceClip,
             primaryFrame: CIImage,
@@ -33,6 +42,7 @@ public enum Renderer {
         ) {
             self.project = project
             self.pts = pts
+            self.sourceTime = sourceTime ?? pts
             self.sidecarOffset = sidecarOffset
             self.primarySource = primarySource
             self.primaryFrame = primaryFrame
@@ -48,26 +58,45 @@ public enum Renderer {
         // Resolve the active caption (if any) at this PTS. Captions live in
         // the Project model; the resolver is a pure function of (project, t).
         let captionText = CaptionResolver.active(at: inputs.pts, captions: inputs.project.captions)
+        let k = inputs.renderScale
+        let scaled = abs(k - 1) > 1e-6
+        func down(_ img: CIImage) -> CIImage {
+            scaled ? img.transformed(by: CGAffineTransform(scaleX: k, y: k)) : img
+        }
+        var canvas = inputs.project.canvas
+        if scaled {
+            canvas = CanvasSpec(widthPx: Int((Double(canvas.widthPx) * k).rounded()),
+                                heightPx: Int((Double(canvas.heightPx) * k).rounded()))
+        }
+        let provider = inputs.frameProvider
         let ctx = RenderCtx(
             pts: inputs.pts,
-            canvas: inputs.project.canvas,
+            canvas: canvas,
             quality: inputs.quality,
             primarySource: inputs.primarySource,
             ciContext: inputs.ciContext,
             captionTextForFrame: captionText,
-            backgroundImage: inputs.backgroundImage,
-            frameProvider: inputs.frameProvider
+            backgroundImage: inputs.backgroundImage.map(down),
+            frameProvider: scaled ? { id, t in provider(id, t).map(down) } : provider
         )
 
-        var image = inputs.primaryFrame
+        var image = down(inputs.primaryFrame)
 
-        let streamTime = CMTimeAdd(inputs.pts, inputs.sidecarOffset)
+        let streamTime = CMTimeAdd(inputs.sourceTime, inputs.sidecarOffset)
         let regionResolved = ZoomRegionResolver.resolved(
-            at: inputs.pts, regions: inputs.project.zoomRegions
+            at: inputs.sourceTime, regions: inputs.project.zoomRegions
         )
 
-        for inst in inputs.project.nodeGraph.nodes where inst.enabled {
-            guard let node = NodeRegistry.videoNode(inst.nodeType) else { continue }
+        for inst in inputs.project.nodeGraph.nodes {
+            // Background off: the frame still has to land in canvas space —
+            // later nodes (webcam overlay) and the output assume it. Without
+            // this the screen sat 1:1 in the bottom-left corner, cropped
+            // (julie: "remove 背景视觉会偏").
+            if inst.nodeType == "background_compose", !inst.enabled {
+                image = fitToCanvas(image, canvas: canvas)
+                continue
+            }
+            guard inst.enabled, let node = NodeRegistry.videoNode(inst.nodeType) else { continue }
             var resolved = ParamResolver.resolve(
                 bindings: inst.bindings, at: inputs.pts,
                 streamTime: streamTime, sidecars: inputs.sidecars
@@ -91,9 +120,50 @@ public enum Renderer {
                     resolved.values["scale"] = .scalar(1.0)
                 }
             }
+            if scaled {
+                // Nodes fall back to their spec defaults for unset params
+                // (e.g. paddingPx 80); fill those in first so they scale too.
+                for spec in type(of: node).spec.paramSchema where resolved.values[spec.name] == nil {
+                    resolved.values[spec.name] = spec.defaultValue
+                }
+                resolved = scaleParams(resolved, nodeType: inst.nodeType, by: k)
+            }
             image = node.apply(input: image, params: resolved, ctx: ctx)
         }
 
         return image
+    }
+
+    /// Pixel-sized params follow the render scale: "*Px" scalars, positions
+    /// (point2, in source pixels), and a few sizes without the suffix.
+    /// Ratios (zoom factor, opacities) are unchanged.
+    static func scaleParams(_ p: ParamValues, nodeType: String, by k: Double) -> ParamValues {
+        let sizeNames: Set<String> = nodeType == "cursor_paint" ? ["scale", "highlightRadius"]
+            : nodeType == "caption_overlay" ? ["fontSize"] : []
+        var out = p
+        for (name, v) in p.values {
+            switch v {
+            case .point2(let x, let y):
+                out.values[name] = .point2(x: x * k, y: y * k)
+            case .scalar(let x) where name.hasSuffix("Px") || sizeNames.contains(name):
+                out.values[name] = .scalar(x * k)
+            default: break
+            }
+        }
+        return out
+    }
+
+    /// Scale `image` to fit the canvas, centred, over black.
+    static func fitToCanvas(_ image: CIImage, canvas: CanvasSpec) -> CIImage {
+        let cw = CGFloat(canvas.widthPx), ch = CGFloat(canvas.heightPx)
+        let e = image.extent
+        guard e.width > 0, e.height > 0 else { return image }
+        let k = min(cw / e.width, ch / e.height)
+        let placed = image
+            .transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY))
+            .transformed(by: CGAffineTransform(scaleX: k, y: k))
+            .transformed(by: CGAffineTransform(translationX: (cw - e.width * k) / 2, y: (ch - e.height * k) / 2))
+        let rect = CGRect(x: 0, y: 0, width: cw, height: ch)
+        return placed.composited(over: CIImage(color: .black).cropped(to: rect)).cropped(to: rect)
     }
 }

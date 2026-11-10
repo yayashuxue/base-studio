@@ -92,11 +92,12 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     @Published var showWebcamPreview: Bool = false
     @Published var includeSystemAudio: Bool = true
     @Published var includeMic: Bool = true
-    // ON by default. The menu-bar status item can be missed or hidden behind
-    // notch/menu extras; the floating panel gives the user an obvious Stop
-    // affordance while recording. Users can still toggle it off per session.
-    @Published var showFloatingPanel: Bool = true
-    @Published var editorState: EditorState?
+    /// Self-view bubble while recording. Separate from `includeWebcam`:
+    /// hiding the preview never stops the webcam recording.
+    @Published var showCameraWhileRecording: Bool = true
+    @Published var editorState: EditorState? {
+        didSet { editorState?.previewAudioMode = exportAudio.pipelineMode }
+    }
     @Published var library: [RecordingsLibrary.Entry] = []
     @Published var displays: [DisplayInfo] = []
     @Published var windows: [WindowInfo] = []
@@ -140,6 +141,14 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     enum ExportAudio: String, CaseIterable, Identifiable {
         case both, micOnly, systemOnly, mute
         var id: String { rawValue }
+        var pipelineMode: ExportPipeline.AudioMode {
+            switch self {
+            case .both: return .both
+            case .micOnly: return .micOnly
+            case .systemOnly: return .systemOnly
+            case .mute: return .mute
+            }
+        }
         var label: String {
             switch self {
             case .both: return "Both"
@@ -157,7 +166,11 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             }
         }
     }
-    @Published var exportAudio: ExportAudio = .both
+    @Published var exportAudio: ExportAudio = .both {
+        // The preview plays what the export will contain (julie: picking
+        // Mute/Mic/System "didn't work" — it only changed the export).
+        didSet { editorState?.previewAudioMode = exportAudio.pipelineMode }
+    }
 
     weak var webcamPreview: WebcamPreviewSession?
 
@@ -166,6 +179,9 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     private let menuBar = MenuBarController()
     private let countdown = CountdownOverlay()
     private let recordingPanel = RecordingPanel()
+    private let cameraBubble = CameraBubble()
+    private let hotKeys = GlobalHotKeys()
+    private var startGate = TakeStartGate()
     private var hiddenWindow: NSWindow?
 
     init() {
@@ -218,6 +234,63 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         } catch {
             self.phase = .failed("Open failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Nothing would be lost by restarting the app now.
+    var isIdleForUpdate: Bool {
+        switch phase {
+        case .idle, .done, .failed: break
+        default: return false
+        }
+        if case .running = exportPhase { return false }
+        return true
+    }
+
+    // MARK: - library selection (⌘A, ⌘/⇧-click, drag to select)
+
+    /// Recordings selected in the list for a bulk action.
+    @Published var librarySelection: Set<URL> = []
+    private var selectionAnchor: URL?
+
+    /// Click on a row: plain = open it (and select only it); ⌘ = toggle;
+    /// ⇧ = range from the last clicked row.
+    func clickRecording(_ entry: RecordingsLibrary.Entry, modifiers: NSEvent.ModifierFlags) {
+        if modifiers.contains(.command) {
+            if librarySelection.contains(entry.id) { librarySelection.remove(entry.id) } else { librarySelection.insert(entry.id) }
+            selectionAnchor = entry.id
+        } else if modifiers.contains(.shift), let anchor = selectionAnchor,
+                  let a = library.firstIndex(where: { $0.id == anchor }),
+                  let b = library.firstIndex(where: { $0.id == entry.id }) {
+            librarySelection.formUnion(library[min(a, b)...max(a, b)].map(\.id))
+        } else {
+            librarySelection = [entry.id]
+            selectionAnchor = entry.id
+            openRecording(entry)
+        }
+    }
+
+    func selectAllRecordings() { librarySelection = Set(library.map(\.id)) }
+    func clearRecordingSelection() { librarySelection = [] }
+
+    /// Confirm, then move every selected recording to the Trash.
+    func trashSelectedRecordings() {
+        let chosen = library.filter { librarySelection.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = chosen.count == 1 ? "Move this recording to the Trash?" : "Move \(chosen.count) recordings to the Trash?"
+        alert.informativeText = "You can restore them from the Trash."
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        var failed = 0
+        for entry in chosen {
+            do { try RecordingsLibrary.delete(entry) } catch { failed += 1; BSLog.error("trash \(entry.id.lastPathComponent): \(error)") }
+            if editorState?.bundleURL == entry.id { editorState = nil }
+            if lastBundle?.url == entry.id { lastBundle = nil }
+        }
+        librarySelection = []
+        refreshLibrary()
+        if failed > 0 { phase = .failed("\(failed) recording(s) couldn't be moved to the Trash.") }
     }
 
     func deleteRecording(_ entry: RecordingsLibrary.Entry) {
@@ -288,11 +361,30 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                 self.phase = .failed(denied)
                 return
             }
-            self.hiddenWindow = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) })
+            // On restart the window is already hidden — keep the one we hid.
+            if let w = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) {
+                self.hiddenWindow = w
+            }
             // Hide the main window NOW (before the 3-second countdown), not
             // after it. Otherwise the app's own UI gets captured for the first
             // 3 seconds of every recording — the exact thing julie hit in #2.
             self.hiddenWindow?.orderOut(nil)
+            // Open the recorder's camera now so the self-view is live through
+            // the countdown (it used to appear 1–2 s into the take while the
+            // camera warmed up). The home preview must let go of it first.
+            let session = self.makeSession()
+            if self.includeWebcam {
+                await self.webcamPreview?.stopAndWait()
+                if self.showCameraWhileRecording {
+                    do {
+                        try await session.prepareWebcam()
+                        if let cam = session.webcamCaptureSession { self.cameraBubble.show(session: cam) }
+                    } catch {
+                        // start() reports camera problems with the proper UI.
+                        BSLog.warn("camera not ready before countdown: \(error)")
+                    }
+                }
+            }
             self.countdown.run(seconds: 3) { [weak self] in
                 Task { @MainActor [weak self] in
                     await self?.beginCapture()
@@ -352,13 +444,10 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         }
     }
 
-    private func beginCapture() async {
-        guard #available(macOS 13.0, *) else { return }
-        // Release the camera from the home preview before WebcamRecorder opens it.
-        // Two AVCaptureSessions on the same camera collide → AVError -11800 / hang.
-        if includeWebcam {
-            await webcamPreview?.stopAndWait()
-        }
+    /// The session for the next take, created before the countdown so its
+    /// camera can be opened early. Settings are read here, once.
+    @available(macOS 13.0, *)
+    private func makeSession() -> RecordingSession {
         let session = RecordingSession(options: .init(
             includeWebcam: includeWebcam,
             includeSystemAudio: includeSystemAudio,
@@ -366,30 +455,76 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             captureTarget: selectedTarget
         ))
         self.session = session
+        return session
+    }
+
+    private func beginCapture() async {
+        guard #available(macOS 13.0, *) else { return }
+        // Release the camera from the home preview before WebcamRecorder opens it.
+        // Two AVCaptureSessions on the same camera collide → AVError -11800 / hang.
+        if includeWebcam {
+            await webcamPreview?.stopAndWait()
+        }
+        let session = (self.session as? RecordingSession) ?? makeSession()
+        session.onCaptureEnded = { [weak self] error in
+            Task { @MainActor in
+                guard let self, self.phase == .recording else { return }
+                BSLog.warn("screen capture ended outside the app (\(error.localizedDescription)) — finishing the take")
+                self.stopRecording()
+            }
+        }
         phase = .recording
+        startGate.reset()
+
+        hotKeys.onAction = { [weak self] action in
+            switch action {
+            case .stop, .stopLegacy: self?.stopRecording()
+            case .retake: self?.retakeRecording()
+            case .pause: self?.togglePause()
+            }
+        }
+        let keys = hotKeys.register()
+        let stopKey = keys.contains(.stop) ? "⌥⇧S" : (keys.contains(.stopLegacy) ? "⌘⇧." : nil)
 
         // Menu bar status item — primary, always-visible Stop with timer.
         menuBar.onStop = { [weak self] in self?.stopRecording() }
+        menuBar.stopKey = stopKey
         menuBar.show()
 
-        // Floating Stop dock — shown by default so Stop is visible even when
-        // the menu-bar status item is hidden behind macOS menu extras.
-        if showFloatingPanel {
-            recordingPanel.onStop = { [weak self] in self?.stopRecording() }
-            let webcamSession = (includeWebcam && webcamPreview?.isRunning == true)
-                ? webcamPreview?.session : nil
-            recordingPanel.show(
-                webcamSession: webcamSession,
-                levels: session.levels
-            )
-        }
+        // Control bar, always shown: the menu-bar item can be hidden by the
+        // notch, so with no bar there was no visible way to stop (julie, 11/8).
+        recordingPanel.onStop = { [weak self] in self?.stopRecording() }
+        recordingPanel.onRetake = { [weak self] in self?.retakeRecording() }
+        recordingPanel.onPauseToggle = { [weak self] in self?.togglePause() }
+        recordingPanel.show(levels: session.levels, stopKey: stopKey,
+                            restartKey: keys.contains(.retake) ? "⌥⇧R" : nil,
+                            pauseKey: keys.contains(.pause) ? "⌥⇧P" : nil,
+                            cameraOn: includeWebcam, micOn: includeMic)
 
         Task { [weak self] in
             do {
                 let dir = try Self.recordingsDirectory()
                 _ = try await session.start(in: dir)
+                await MainActor.run {
+                    guard let self else { return }
+                    // Stop / Restart pressed while starting runs now, once.
+                    // Show the devices that actually opened, not the settings.
+                    self.recordingPanel.setDevices(cameraOn: session.cameraActive, micOn: session.micActive)
+                    switch self.startGate.didStart() {
+                    case .stop?: self.stopRecording(); return
+                    case .restart?: self.performRestart(session); return
+                    case nil: break
+                    }
+                    guard self.phase == .recording, self.showCameraWhileRecording,
+                          !self.cameraBubble.isShown,
+                          let cam = session.webcamCaptureSession else { return }
+                    self.cameraBubble.show(session: cam)
+                }
             } catch {
                 await MainActor.run {
+                    self?.startGate.didFail()
+                    self?.hotKeys.unregister()
+                    self?.cameraBubble.hide()
                     self?.recordingPanel.hide()
                     self?.menuBar.hide()
                     self?.restoreWindow()
@@ -409,9 +544,12 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             BSLog.warn("stopRecording ignored — phase=\(phase)")
             return
         }
+        guard startGate.request(.stop) else {
+            BSLog.info("stop pressed while the take is starting — stopping once capture is up")
+            return
+        }
         phase = .finalizing
-        recordingPanel.hide()
-        menuBar.hide()
+        endRecordingChrome()
         Task { [weak self] in
             do {
                 let bundle = try await session.stop()
@@ -431,6 +569,81 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
                 await MainActor.run {
                     self?.phase = .failed("Stop failed: \(error.localizedDescription)")
                     self?.restoreWindow()
+                }
+            }
+        }
+    }
+
+    private func endRecordingChrome() {
+        hotKeys.unregister()
+        cameraBubble.hide()
+        recordingPanel.hide()
+        menuBar.hide()
+    }
+
+    /// Pause / resume. While paused nothing is written (see PauseState);
+    /// camera and mic stay open for a quick resume, and the bar says so.
+    /// Ignored until capture is up.
+    func togglePause() {
+        guard #available(macOS 13.0, *), phase == .recording, startGate.started,
+              let session = session as? RecordingSession else { return }
+        if session.isPaused { session.resume() } else { session.pause() }
+        recordingPanel.setPaused(session.isPaused)
+        menuBar.setPaused(session.isPaused)
+        BSLog.info(session.isPaused ? "paused" : "resumed")
+    }
+
+    /// Restart: confirm, finish this take, move it to the Trash (recoverable,
+    /// not deleted), and start a new one with the same settings.
+    func retakeRecording() {
+        guard #available(macOS 13.0, *), phase == .recording,
+              let session = session as? RecordingSession else { return }
+        let alert = NSAlert()
+        alert.messageText = "Restart recording?"
+        alert.informativeText = "This take moves to the Trash and a new recording starts."
+        alert.addButton(withTitle: "Restart")
+        alert.addButton(withTitle: "Keep Recording")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn, phase == .recording else { return }
+        guard startGate.request(.restart) else {
+            BSLog.info("restart confirmed while the take is starting — restarting once capture is up")
+            return
+        }
+        performRestart(session)
+    }
+
+    /// Only a take that was finished AND moved to the Trash is replaced; if
+    /// either fails, the take is kept where it is, the error is shown, and no
+    /// new recording starts (the dialog promised the old one goes to Trash).
+    @available(macOS 13.0, *)
+    private func performRestart(_ session: RecordingSession) {
+        guard phase == .recording else { return }
+        phase = .finalizing
+        endRecordingChrome()
+        Task { [weak self] in
+            var problem: String?
+            do {
+                let bundle = try await session.stop()
+                do {
+                    try FileManager.default.trashItem(at: bundle.url, resultingItemURL: nil)
+                    BSLog.info("restart: moved \(bundle.url.lastPathComponent) to Trash")
+                } catch {
+                    problem = "Couldn't move the take to the Trash (\(error.localizedDescription)). It's kept in your recordings."
+                }
+            } catch {
+                problem = "Couldn't finish the take (\(error.localizedDescription)). Whatever was recorded is kept."
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.session = nil
+                if let problem {
+                    BSLog.error("restart stopped: \(problem)")
+                    self.phase = .failed("Restart stopped: \(problem)")
+                    self.restoreWindow()
+                    self.refreshLibrary()
+                } else {
+                    self.phase = .idle
+                    self.startRecording()
                 }
             }
         }
@@ -476,14 +689,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             return (w & ~1, h & ~1)
         }()
 
-        let audioMode: ExportPipeline.AudioMode = {
-            switch exportAudio {
-            case .both: return .both
-            case .micOnly: return .micOnly
-            case .systemOnly: return .systemOnly
-            case .mute: return .mute
-            }
-        }()
+        let audioMode = exportAudio.pipelineMode
 
         Task { [weak self] in
             do {

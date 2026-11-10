@@ -1,3 +1,4 @@
+import AVFoundation
 import BaseStudioCore
 import Foundation
 
@@ -43,18 +44,22 @@ public final class RecordingSession {
         public var includeMic: Bool
         public var cursorSampleHz: Int
         public var captureTarget: CaptureTarget?
+        /// Record Base Studio's own windows too (sync-marker self-test only).
+        public var capturesOwnWindows: Bool
         public init(
             includeWebcam: Bool = false,
             includeSystemAudio: Bool = true,
             includeMic: Bool = false,
             cursorSampleHz: Int = 120,
-            captureTarget: CaptureTarget? = nil
+            captureTarget: CaptureTarget? = nil,
+            capturesOwnWindows: Bool = false
         ) {
             self.includeWebcam = includeWebcam
             self.includeSystemAudio = includeSystemAudio
             self.includeMic = includeMic
             self.cursorSampleHz = cursorSampleHz
             self.captureTarget = captureTarget
+            self.capturesOwnWindows = capturesOwnWindows
         }
     }
 
@@ -72,12 +77,54 @@ public final class RecordingSession {
         self.screenRecorder = ScreenRecorder(
             captureSystemAudio: options.includeSystemAudio,
             captureTarget: options.captureTarget,
-            levels: levels
+            levels: levels,
+            capturesOwnWindows: options.capturesOwnWindows
         )
         self.cursorRecorder = CursorRecorder(sampleHz: options.cursorSampleHz)
         self.micRecorder = MicRecorder(levels: levels)
+        screenRecorder.pauseState = pauseState
+        webcamRecorder.pauseState = pauseState
+        micRecorder.pauseState = pauseState
+        cursorRecorder.pauseState = pauseState
         // Reassign with the shared instance so audioLevels reads from the same one.
         // (audioLevels is `let`; we pass `levels` to the recorders directly.)
+    }
+
+    /// Pause: every recorder drops its samples until resume — nothing from
+    /// the paused stretch is written. Devices stay open for a quick resume.
+    private let pauseState = PauseState()
+    public var isPaused: Bool { pauseState.isPaused }
+    /// Whether the mic actually started (a failed mic doesn't stop the take).
+    public private(set) var micActive = false
+    /// Whether the camera is actually open.
+    public var cameraActive: Bool { webcamCaptureSession != nil }
+    public func pause() { if state == .recording { pauseState.pause() } }
+    public func resume() { pauseState.resume() }
+
+    /// Screen capture ended without `stop()` (e.g. macOS "Stop Sharing").
+    /// Called on a background queue; the owner should call `stop()`.
+    public var onCaptureEnded: (@Sendable (Error) -> Void)? {
+        get { screenRecorder.onCaptureEnded }
+        set { screenRecorder.onCaptureEnded = newValue }
+    }
+
+    var screenRecorderForTests: ScreenRecorder { screenRecorder }
+
+    /// Open the camera before recording (during the countdown) so the
+    /// self-view is live from the first second; nothing is written yet.
+    public func prepareWebcam() async throws {
+        guard options.includeWebcam else { return }
+        try await webcamRecorder.prepare()
+    }
+
+    /// Close a camera opened by `prepareWebcam()` if recording never starts.
+    public func cancelPreparedWebcam() {
+        webcamRecorder.cancelPrepared()
+    }
+
+    /// The webcam's capture session while recording (nil without webcam).
+    public var webcamCaptureSession: AVCaptureSession? {
+        options.includeWebcam ? webcamRecorder.captureSession : nil
     }
 
     public var levels: AudioLevels {
@@ -101,8 +148,11 @@ public final class RecordingSession {
         // take the whole app down.
         guard state == .idle else { throw RecordingSessionError.alreadyRunning }
         let bundle = try ProjectBundle.create(in: directory, name: name)
+        // `create` always returns a new, empty bundle, so no earlier take's
+        // failure.json / edl.json can leak into this one.
         self.bundle = bundle
         state = .recording
+        SilentAudio.resetFailures()
 
         cursorRecorder.start()
 
@@ -110,6 +160,7 @@ public final class RecordingSession {
             do {
                 let url = bundle.url.appendingPathComponent("mic.m4a")
                 try await micRecorder.start(outputURL: url)
+                micActive = true
             } catch {
                 BSLog.warn("mic start failed: \(error)")
             }
@@ -126,6 +177,7 @@ public final class RecordingSession {
                 // sees a chance to grant access). Tear down what we already
                 // started and propagate as a recognisable permission error.
                 BSLog.error("webcam permission denied — aborting recording")
+                webcamRecorder.cancelPrepared()
                 _ = cursorRecorder.stop()
                 if options.includeMic { _ = await micRecorder.stop() }
                 state = .idle
@@ -136,6 +188,7 @@ public final class RecordingSession {
                 // succeed, but the webcam is missing. Surface a visible error
                 // and let the user turn Webcam off if they want screen-only.
                 BSLog.error("webcam start failed — aborting recording: \(error)")
+                webcamRecorder.cancelPrepared()
                 _ = cursorRecorder.stop()
                 if options.includeMic { _ = await micRecorder.stop() }
                 state = .idle
@@ -163,6 +216,10 @@ public final class RecordingSession {
         // common "crashed halfway through" path.
         guard state == .recording else { throw RecordingSessionError.notRunning }
         state = .finalizing
+        // A pause still open at Stop stays open while the recorders stop and
+        // drain, so nothing is written on the way out; it is closed (for
+        // metadata) only afterwards, at the moment Stop was pressed.
+        let stopPressedAt = HostClock.now()
         defer { state = .idle }
         guard let bundle else { throw RecordingSessionError.missingBundle }
 
@@ -238,6 +295,9 @@ public final class RecordingSession {
             $0 == .zero ? nil : TimePoint($0)
         }
 
+        let pauses = pauseState.finish(at: stopPressedAt).map {
+            PauseInterval(start: TimePoint($0.start), end: TimePoint($0.end))
+        }
         let meta = RecordingMetadata(
             displayID: screenResult.displayID,
             widthPx: screenResult.widthPx,
@@ -250,7 +310,8 @@ public final class RecordingSession {
             firstVideoPTS: TimePoint(screenResult.firstPTS),
             lastVideoPTS: TimePoint(screenResult.lastPTS),
             sources: sourceInfo,
-            micFirstPTS: micFirstPTS
+            micFirstPTS: micFirstPTS,
+            pauses: pauses.isEmpty ? nil : pauses
         )
         let metaData = try JSONEncoder.pretty.encode(meta)
         try metaData.write(to: bundle.metadataURL, options: .atomic)

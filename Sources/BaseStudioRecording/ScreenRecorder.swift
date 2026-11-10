@@ -1,4 +1,5 @@
 import AVFoundation
+import VideoToolbox
 import BaseStudioCore
 import CoreMedia
 import Foundation
@@ -108,6 +109,85 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
+    // Mid-recording encoder recovery. VideoToolbox can invalidate a live
+    // compression session (-12785 kVTInvalidSessionErr) minutes into a take
+    // (sleep/wake, display reconfig, encoder pre-emption). The writer then
+    // stays `.failed` and the whole screen.mov used to be lost. Now each writer
+    // is a *segment*: fragmented on disk (readable up to the last fragment even
+    // if it never finalizes) and, on failure, replaced by a fresh one; stop()
+    // stitches the segments back onto the original timeline.
+    private let writerLock = NSLock()
+    private var outputURL: URL?
+    private var fps: Int = 60
+    private var segments: [(url: URL, start: CMTime)] = []
+    private var sessionStarted = false
+    private var recoveries: Int = 0
+    private var lastFailureAt: CFAbsoluteTime = 0
+    static let maxRecoveries = 20
+    public static let fragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
+    /// Test-only fault injection (`BS_INJECT_SCREEN_FAIL_AT_FRAMES=300,900`):
+    /// abandon the current segment at those appended-frame counts as if the
+    /// encoder had been invalidated. Never set in normal runs.
+    private var injectFailAt: Set<Int> = []
+    /// Test-only (`BS_INJECT_SCREEN_CANCEL_AT_FRAMES`): cancel the writer at
+    /// those counts so it turns `.cancelled` and its input stops being ready —
+    /// the "dead encoder, input never ready" path, which must still roll over.
+    private var injectCancelAt: Set<Int> = []
+    /// Test-only (`BS_INJECT_SCREEN_FAIL_AT_SECONDS=90,200`): abandon the
+    /// current segment once the take passes these times (seconds since the
+    /// first frame). Time-based so long takes fail at predictable moments.
+    private var injectFailAtSeconds: [Double] = []
+    /// Test-only (`BS_INJECT_SCREEN_SILENCE_AFTER_SECONDS=10`): ignore every
+    /// screen frame after this point, as a locked/sleeping display does.
+    private var injectSilenceAfter: Double?
+    private var injectStreamStopAt: Double?
+    public private(set) var screenRecoveryCount: Int = 0
+    /// Software H.264 instead of VideoToolbox hardware (experiment: BS_FORCE_SW_ENCODER=1).
+    private var useSoftwareEncoder = ProcessInfo.processInfo.environment["BS_FORCE_SW_ENCODER"] == "1"
+    /// After the first encoder failure, feed the encoder our own copies of
+    /// SCK's frames instead of SCK's IOSurfaces. A degraded capture stack can
+    /// hand out surfaces every encoder session rejects on frame 1 (-12785),
+    /// while the same writer accepts frames from our own pool (verified with
+    /// --selftest-synthetic-writer). Kept as the default; see below.
+    /// Default ON (the zero-copy path died on frame 1 on a real machine while
+    /// copies encoded cleanly); BS_SCREEN_ZERO_COPY=1 restores zero-copy, and
+    /// even then the first encoder failure switches to copies.
+    private var copyFrames = ProcessInfo.processInfo.environment["BS_SCREEN_ZERO_COPY"] != "1"
+    private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var pendingAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var copyDropsNoPool = 0
+    private var copyIdleFrames = 0
+    /// Diagnostics for unexplained segment loss (a 330 s take lost 52.8 s of
+    /// segment 2 that no probe reproduces): every 5 s log the current
+    /// segment's on-disk size and writer status, so the next occurrence shows
+    /// when data stopped reaching the disk.
+    private var lastSizeLog: CFAbsoluteTime = 0
+    /// Capture watchdog (diagnostics only): when did ScreenCaptureKit last
+    /// deliver a screen callback / an audio buffer? Logged every 5 s from a
+    /// timer that does not depend on frames arriving, so a stalled capture
+    /// source is visible in the log (in the 10/31 take both picture and
+    /// sound vanished for the same 52 s).
+    /// Written on the SCK screen/audio queues, read on the timer queue →
+    /// its own lock; the timer reads one snapshot, never the live counters.
+    private struct CaptureActivity {
+        var lastScreen: CFAbsoluteTime = 0
+        var lastAudio: CFAbsoluteTime = 0
+        var screenCallbacks = 0
+        var audioCallbacks = 0
+    }
+    private let activityLock = NSLock()
+    private var _activity = CaptureActivity()
+    private var watchdog: DispatchSourceTimer?
+    /// Last frame actually encoded + its time. SCK sends no picture while the
+    /// screen is static, so without a closing frame the video track ended at
+    /// the last *change* (5.2 s of an 8 s take) and export cut the tail —
+    /// audio included. stop() re-appends this frame at the take's end.
+    private var lastEncodedFrame: CVPixelBuffer?
+    private var lastEncodedPTS: CMTime?
+    /// Our own NV12 pool for copied frames — the adaptor's pool stays nil for
+    /// the first seconds of a session, which dropped ~60 % of frames.
+    private var copyPool: CVPixelBufferPool?
+    private var copyDropsAlloc = 0
     private let captureSystemAudio: Bool
     private var firstPTS: CMTime?
     private var firstAudioPTS: CMTime?
@@ -141,16 +221,27 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     private let captureTarget: CaptureTarget?
     private let levels: AudioLevels?
+    /// Display capture leaves out Base Studio's own windows (Stop dock,
+    /// camera bubble) unless this is set — the webcam is composited from its
+    /// own track at export, so a captured bubble would show two faces. The
+    /// sync-marker self-test sets it: its flash window must be recorded.
+    private let capturesOwnWindows: Bool
     public var sharedLevels: AudioLevels? { levels }
+    /// Called on an SCK queue when capture ends without stop() being called.
+    public var onCaptureEnded: (@Sendable (Error) -> Void)?
+    /// While paused, screen and system-audio samples are dropped (not written).
+    public var pauseState: PauseState?
 
     public init(
         captureSystemAudio: Bool = true,
         captureTarget: CaptureTarget? = nil,
-        levels: AudioLevels? = nil
+        levels: AudioLevels? = nil,
+        capturesOwnWindows: Bool = false
     ) {
         self.captureSystemAudio = captureSystemAudio
         self.captureTarget = captureTarget
         self.levels = levels
+        self.capturesOwnWindows = capturesOwnWindows
         super.init()
     }
 
@@ -165,8 +256,12 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
         let content: SCShareableContent
         do {
+            // onScreenWindowsOnly: false — with the main window hidden and
+            // the Stop dock off, Base Studio has no on-screen window at start,
+            // was missing from `applications`, and the camera bubble shown a
+            // second later got recorded.
             content = try await SCShareableContent.excludingDesktopWindows(
-                false, onScreenWindowsOnly: true
+                false, onScreenWindowsOnly: false
             )
         } catch {
             // Translate SCK's permission errors into our typed error so the UI
@@ -251,7 +346,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             )
             widthPx = physical.0
             heightPx = physical.1
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            let ownApps = capturesOwnWindows ? [] : content.applications.filter { $0.processID == ownPID }
+            filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
+            BSLog.info("display capture excludes own windows: \(!ownApps.isEmpty)")
             self.displayOriginPt = nsScreen?.frame.origin ?? .zero
             self.displaySizePt = nsScreen?.frame.size
                 ?? CGSize(width: Double(display.width), height: Double(display.height))
@@ -262,7 +360,10 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         let widthPx2 = (widthPx >> 1) << 1
         let heightPx2 = (heightPx >> 1) << 1
         self.displayID = displayUsed.displayID
-        self.pointScale = scale
+        // Pixels per point of the frame actually recorded (it may be capped
+        // below the display's backing scale), not the backing scale itself.
+        let sizePt = self.displaySizePt
+        self.pointScale = sizePt.width > 0 ? Double(widthPx2) / Double(sizePt.width) : scale
         self.widthPx = widthPx2
         self.heightPx = heightPx2
         let widthPxFinal = widthPx2
@@ -284,61 +385,29 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             config.channelCount = 2
         }
 
-        // AVAssetWriter
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
         }
-        let writer: AVAssetWriter
-        do {
-            writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        } catch {
-            throw ScreenRecorderError.writerSetupFailed(error.localizedDescription)
-        }
-        // H.264 for the recorded source. Keep the broadly compatible codec, but
-        // pair it with NV12 frames above so VideoToolbox does not have to encode
-        // SCK's BGRA buffers directly.
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: widthPxFinal,
-            AVVideoHeightKey: heightPxFinal,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: max(8_000_000, widthPxFinal * heightPxFinal * fps / 12),
-                AVVideoMaxKeyFrameIntervalKey: fps * 2,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-            ],
-        ]
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        videoInput.expectsMediaDataInRealTime = true
-        guard writer.canAdd(videoInput) else {
-            throw ScreenRecorderError.writerSetupFailed("cannot add video input")
-        }
-        writer.add(videoInput)
-
-        // Audio writer input (system audio from SCK).
-        var audioInput: AVAssetWriterInput?
-        if captureSystemAudio {
-            let audioSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVNumberOfChannelsKey: 2,
-                AVSampleRateKey: 48_000,
-                AVEncoderBitRateKey: 192_000,
-            ]
-            let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            ai.expectsMediaDataInRealTime = true
-            if writer.canAdd(ai) {
-                writer.add(ai)
-                audioInput = ai
-            }
-        }
-
-        guard writer.startWriting() else {
-            throw ScreenRecorderError.writerSetupFailed(
-                writer.error?.localizedDescription ?? "startWriting failed"
-            )
-        }
+        self.widthPx = widthPxFinal
+        self.heightPx = heightPxFinal
+        self.fps = fps
+        self.outputURL = outputURL
+        let (writer, videoInput, audioInput) = try makeSegmentWriter(url: outputURL)
+        self.segments = [(outputURL, .invalid)]
+        self.sessionStarted = false
+        self.recoveries = 0
+        self.screenRecoveryCount = 0
+        self.lastFailureAt = 0
+        self.injectFailAt = Self.frameList("BS_INJECT_SCREEN_FAIL_AT_FRAMES")
+        self.injectCancelAt = Self.frameList("BS_INJECT_SCREEN_CANCEL_AT_FRAMES")
+        self.injectSilenceAfter = ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_SILENCE_AFTER_SECONDS"].flatMap(Double.init)
+        self.injectStreamStopAt = ProcessInfo.processInfo.environment["BS_INJECT_STREAM_STOP_AT_SECONDS"].flatMap(Double.init)
+        self.injectFailAtSeconds = (ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_FAIL_AT_SECONDS"] ?? "")
+            .split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.sorted()
         self.writer = writer
         self.videoInput = videoInput
         self.audioInput = audioInput
+        self.adaptor = pendingAdaptor
         self.firstPTS = nil
         self.firstAudioPTS = nil
         self.lastPTS = nil
@@ -363,7 +432,26 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         do {
             try await attachAndStart(adapter: adapter, captureAudio: captureSystemAudio)
             self.isRunning = true
-            BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio)")
+            startWatchdog()
+            if let at = injectStreamStopAt {
+                // Test-only: end the real stream as macOS "Stop Sharing" does,
+                // so stop() meets the genuine "already stopped" error.
+                // Bound to THIS take's adapter: a stale task must never stop
+                // a later take's stream; a cancelled sleep does nothing.
+                let thisTake = adapter
+                Task { [weak self] in
+                    do { try await Task.sleep(nanoseconds: UInt64(at * 1_000_000_000)) } catch { return }
+                    guard let self, self.isRunning, let current = self.streamAdapter,
+                          current === thisTake else { return }
+                    try? await thisTake.stopCapture()
+                    // Re-check after the await: the take may have ended (and
+                    // another begun) meanwhile — report only to this take.
+                    guard self.isRunning, let still = self.streamAdapter, still === thisTake else { return }
+                    self.handleStreamStopped(NSError(domain: SCStreamErrorDomain, code: -3817,
+                        userInfo: [NSLocalizedDescriptionKey: "injected: the user stopped the stream"]))
+                }
+            }
+            BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio), softwareEncoder=\(useSoftwareEncoder)")
         } catch {
             BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
             // Best-effort remove the outputs we attached + stop the possibly-
@@ -373,6 +461,233 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             resetHandles()
             throw error
         }
+    }
+
+    /// Copy an NV12 (420v) buffer into a fresh buffer from `pool`, plane by
+    /// plane, so the encoder never sees the capture stack's IOSurface.
+    static func copyNV12(_ src: CVPixelBuffer, pool: CVPixelBufferPool?) -> CVPixelBuffer? {
+        guard let pool, CVPixelBufferGetPlaneCount(src) == 2 else { return nil }
+        var out: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let dst = out,
+              CVPixelBufferGetPlaneCount(dst) == 2 else { return nil }
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(dst, [])
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+        }
+        for plane in 0..<2 {
+            guard let s = CVPixelBufferGetBaseAddressOfPlane(src, plane),
+                  let d = CVPixelBufferGetBaseAddressOfPlane(dst, plane) else { return nil }
+            let sRow = CVPixelBufferGetBytesPerRowOfPlane(src, plane)
+            let dRow = CVPixelBufferGetBytesPerRowOfPlane(dst, plane)
+            let rows = min(CVPixelBufferGetHeightOfPlane(src, plane), CVPixelBufferGetHeightOfPlane(dst, plane))
+            let n = min(sRow, dRow)
+            for r in 0..<rows { memcpy(d + r * dRow, s + r * sRow, n) }
+        }
+        return dst
+    }
+
+    static func makeNV12Pool(width: Int, height: Int) -> CVPixelBufferPool? {
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey as String: 8] as CFDictionary, [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ] as CFDictionary, &pool)
+        return pool
+    }
+
+    /// The screen encoder settings — shared with the self-test fragment probe
+    /// so it exercises exactly what the recorder writes.
+    public static func screenVideoSettings(width: Int, height: Int, fps: Int, timeCappedKeyframes: Bool = true) -> [String: Any] {
+        var props: [String: Any] = [
+            AVVideoAverageBitRateKey: max(8_000_000, width * height * fps / 12),
+            AVVideoMaxKeyFrameIntervalKey: fps * 2,
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+        ]
+        if timeCappedKeyframes {
+            // Defensive: also cap the keyframe gap in *time* (≤1 s), so a
+            // static screen (a frame every few seconds) still gets regular
+            // keyframes. NOT a proven fix for the 52.8 s loss in the 10/31
+            // take: the fragment probes (--selftest-fragment-probe[-realtime])
+            // show no difference with or without it, and that loss's cause is
+            // still unknown.
+            props[AVVideoMaxKeyFrameIntervalDurationKey] = 1.0
+        }
+        return [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: props,
+        ]
+    }
+
+    static func frameList(_ env: String) -> Set<Int> {
+        Set((ProcessInfo.processInfo.environment[env] ?? "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+    }
+
+    static func writerIsDead(_ status: AVAssetWriter.Status) -> Bool {
+        status == .failed || status == .cancelled
+    }
+
+    /// The writer/inputs of the *current* segment. A rollover can swap them on
+    /// the screen queue, so stop() must re-read after draining the queues.
+    func currentAdaptor() -> AVAssetWriterInputPixelBufferAdaptor? {
+        writerLock.lock(); defer { writerLock.unlock() }
+        return adaptor
+    }
+
+    func currentHandles() -> (AVAssetWriter?, AVAssetWriterInput?, AVAssetWriterInput?) {
+        writerLock.lock(); defer { writerLock.unlock() }
+        return (writer, videoInput, audioInput)
+    }
+
+    /// Build one started segment writer (H.264 + optional system-audio AAC),
+    /// fragmented every 2 s so a segment whose encoder dies is still readable.
+    private func makeSegmentWriter(url: URL) throws -> (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput?) {
+        let writer: AVAssetWriter
+        do {
+            writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        } catch {
+            throw ScreenRecorderError.writerSetupFailed(error.localizedDescription)
+        }
+        writer.movieFragmentInterval = Self.fragmentInterval
+        // H.264 for the recorded source. Keep the broadly compatible codec, but
+        // pair it with NV12 frames so VideoToolbox does not have to encode
+        // SCK's BGRA buffers directly.
+        var videoSettings = Self.screenVideoSettings(width: widthPx, height: heightPx, fps: fps)
+        if useSoftwareEncoder {
+            // Hardware H.264 sessions can be dead on arrival (-12785/-16122 on
+            // frame 1) when the media stack is degraded; Apple's software
+            // encoder is slower but independent of that state.
+            videoSettings[AVVideoEncoderSpecificationKey] = [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false,
+            ]
+        }
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(videoInput) else {
+            throw ScreenRecorderError.writerSetupFailed("cannot add video input")
+        }
+        writer.add(videoInput)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: widthPx,
+            kCVPixelBufferHeightKey as String: heightPx,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ])
+        self.pendingAdaptor = adaptor
+
+        var audioInput: AVAssetWriterInput?
+        if captureSystemAudio {
+            let audioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVNumberOfChannelsKey: 2,
+                AVSampleRateKey: 48_000,
+                AVEncoderBitRateKey: 192_000,
+            ]
+            let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            ai.expectsMediaDataInRealTime = true
+            if writer.canAdd(ai) {
+                writer.add(ai)
+                audioInput = ai
+            }
+        }
+        guard writer.startWriting() else {
+            throw ScreenRecorderError.writerSetupFailed(
+                writer.error?.localizedDescription ?? "startWriting failed"
+            )
+        }
+        return (writer, videoInput, audioInput)
+    }
+
+    /// The current segment's encoder died (or a test injected that). Leave its
+    /// fragmented file on disk as-is and open the next segment; the next frame
+    /// starts its session. Called on the screen queue.
+    private func rollOverSegment(reason: String) {
+        guard let base = outputURL else { writerHasFailed = true; return }
+        recoveries += 1
+        lastFailureAt = CFAbsoluteTimeGetCurrent()
+        if !copyFrames {
+            copyFrames = true
+            BSLog.warn("switching screen encoding to copied frames after encoder failure")
+        }
+        guard recoveries <= Self.maxRecoveries else {
+            BSLog.error("screen encoder failed again (\(reason)); giving up after \(Self.maxRecoveries) recoveries")
+            writerHasFailed = true
+            return
+        }
+        let url = base.deletingLastPathComponent()
+            .appendingPathComponent("screen.part\(recoveries).mov")
+        try? FileManager.default.removeItem(at: url)
+        do {
+            let (w, v, a) = try makeSegmentWriter(url: url)
+            writerLock.lock()
+            writer = w; videoInput = v; audioInput = a; adaptor = pendingAdaptor; sessionStarted = false
+            segments.append((url, .invalid))
+            writerLock.unlock()
+            screenRecoveryCount = recoveries
+            BSLog.warn("screen encoder failed (\(reason)) — continuing in \(url.lastPathComponent)")
+        } catch {
+            BSLog.error("could not open a replacement screen segment: \(error)")
+            writerHasFailed = true
+        }
+    }
+
+    /// Put the segments back onto the original timeline (gaps stay gaps, so
+    /// screen stays in sync with webcam/mic) and write `outputURL`. Segments
+    /// that hold no readable video are skipped.
+    static func stitch(segments: [(url: URL, start: CMTime)], origin: CMTime, into outputURL: URL) async throws {
+        let comp = AVMutableComposition()
+        guard let vTrack = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+        else { throw ScreenRecorderError.writerFailed("stitch: cannot create video track") }
+        var aTrack: AVMutableCompositionTrack?
+        var usable = 0
+        var transform: CGAffineTransform?
+        for seg in segments where seg.start.isValid {
+            let asset = AVURLAsset(url: seg.url)
+            guard let v = try? await asset.loadTracks(withMediaType: .video).first else { continue }
+            let range = (try? await v.load(.timeRange)) ?? .zero
+            guard range.duration.seconds > 0 else { continue }
+            // File time 0 of a segment is its session start (= seg.start on
+            // the host clock). Media at file time t belongs at offset + t, so
+            // each track is placed by its OWN start — audio usually begins a
+            // little after the first frame; anchoring it at the segment start
+            // would pull it early and break A/V sync.
+            let offset = CMTimeMaximum(.zero, CMTimeSubtract(seg.start, origin))
+            try vTrack.insertTimeRange(range, of: v, at: CMTimeAdd(offset, range.start))
+            if transform == nil { transform = try? await v.load(.preferredTransform) }
+            if let a = try? await asset.loadTracks(withMediaType: .audio).first {
+                let ar = (try? await a.load(.timeRange)) ?? .zero
+                if ar.duration.seconds > 0 {
+                    if aTrack == nil {
+                        aTrack = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                    }
+                    try? aTrack?.insertTimeRange(ar, of: a, at: CMTimeAdd(offset, ar.start))
+                }
+            }
+            usable += 1
+        }
+        guard usable > 0 else { throw ScreenRecorderError.noFramesWritten }
+        if let transform { vTrack.preferredTransform = transform }
+        let tmp = outputURL.deletingLastPathComponent()
+            .appendingPathComponent("screen.stitching-\(UUID().uuidString).mov")
+        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetPassthrough) else {
+            throw ScreenRecorderError.writerFailed("stitch: no passthrough export session")
+        }
+        export.outputURL = tmp
+        export.outputFileType = .mov
+        await export.export()
+        guard export.status == .completed else {
+            try? FileManager.default.removeItem(at: tmp)
+            throw ScreenRecorderError.writerFailed("stitch export failed: \(String(describing: export.error))")
+        }
+        try? FileManager.default.removeItem(at: outputURL)
+        try FileManager.default.moveItem(at: tmp, to: outputURL)
+        for seg in segments where seg.url != outputURL { try? FileManager.default.removeItem(at: seg.url) }
     }
 
     /// Attach the screen (+ optional audio) outputs and start capture on the
@@ -408,7 +723,31 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     /// Drop every capture handle and return to non-running. Single source of
     /// truth for teardown so no failure path forgets one. Internal for tests.
+    private func startWatchdog() {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        let started = CFAbsoluteTimeGetCurrent()
+        activityLock.lock()
+        _activity = CaptureActivity(lastScreen: started, lastAudio: started)
+        activityLock.unlock()
+        t.schedule(deadline: .now() + 5, repeating: 5)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.activityLock.lock()
+            let a = self._activity
+            self.activityLock.unlock()
+            let now = CFAbsoluteTimeGetCurrent()
+            let sinceScreen = now - a.lastScreen, sinceAudio = now - a.lastAudio
+            let msg = String(format: "capture watchdog: last screen callback %.1f s ago, last audio buffer %.1f s ago (callbacks screen=%d audio=%d)",
+                             sinceScreen, sinceAudio, a.screenCallbacks, a.audioCallbacks)
+            if sinceScreen > 5 || (self.captureSystemAudio && sinceAudio > 5) { BSLog.warn(msg) } else { BSLog.info(msg) }
+        }
+        t.resume()
+        watchdog = t
+    }
+
     func resetHandles() {
+        watchdog?.cancel()
+        watchdog = nil
         self.streamAdapter = nil
         self.attachedOutputs = []
         self.writer = nil
@@ -469,13 +808,26 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     }
 
     public func stop() async throws -> Result {
-        guard isRunning, let adapter = streamAdapter, let writer, let videoInput else {
+        guard isRunning, let adapter = streamAdapter, writer != nil, videoInput != nil else {
             throw ScreenRecorderError.notRunning
         }
         // Always return to a clean non-running state — even if stopCapture or
         // finalize throws — so a broken stop can't leave a leaked .writing
         // AVAssetWriter behind.
         defer { resetHandles() }
+
+        // The take ends when the user stops — not at the last frame SCK sent.
+        // SCK sends nothing for a static or locked screen (a 330 s take whose
+        // screen locked after 10 s had its last frame at 10 s), so the
+        // timeline and the closing frame are anchored to now, on the same host
+        // clock SCK stamps frames with.
+        // Stopped while paused: the take ended when the pause began — nothing
+        // after that may be written, not even the closing frame.
+        // The closing frame sits one frame before the end, so the track ends
+        // exactly at the pause start.
+        let stopHostTime = pauseState?.openPauseStart.map { CMTimeSubtract($0, CMTime(value: 1, timescale: CMTimeScale(fps))) }
+            ?? CMClockGetTime(CMClockGetHostTimeClock())
+        if let last = lastPTS, CMTimeCompare(stopHostTime, last) > 0 { lastPTS = stopHostTime }
 
         var stopCaptureError: Error?
         do {
@@ -493,36 +845,71 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         screenQueue.sync {}
         audioQueue.sync {}
 
+        // The stream already ended on its own (macOS "Stop Sharing", -3817):
+        // stopCapture then fails with "already stopped" — that is expected,
+        // and the footage up to that point must still be finished and kept.
+        // (Live run 11/10: the take was thrown away instead.)
+        if let e = stopCaptureError, Self.isExpectedStopFailure(e, streamAlreadyStopped: readStreamStopError() != nil) {
+            BSLog.warn("stopCapture after the stream had already stopped: \(e.localizedDescription) — finishing the take")
+            stopCaptureError = nil
+        }
         if let stopCaptureError {
             // Abnormal capture end — don't try to finalize a broken session.
-            writer.cancelWriting()
+            currentHandles().0?.cancelWriting()
             throw ScreenRecorderError.writerFailed(
                 "SCStream stopCapture failed: \(stopCaptureError.localizedDescription)"
             )
         }
 
-        videoInput.markAsFinished()
-        audioInput?.markAsFinished()
-        await writer.finishWriting()
-        BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
-        let writerStatus = writer.status
-        let writerError = writer.error
+        // Re-read: a rollover may have happened while stopCapture()/the drain
+        // ran, and that newest segment is the one to finalize.
+        let (curWriter, curVideo, curAudio) = currentHandles()
+        guard let writer = curWriter, let videoInput = curVideo else { throw ScreenRecorderError.notRunning }
+        let audioInput = curAudio
+        // The current segment may be healthy (finish it) or dead (leave its
+        // fragments alone). Earlier dead segments are already on disk.
+        if writer.status == .writing {
+            // Hold the last picture until the end of the take (see lastEncodedFrame).
+            if let frame = lastEncodedFrame, let at = lastEncodedPTS, let end = lastPTS,
+               sessionStarted, CMTimeCompare(end, at) > 0, let adaptor = currentAdaptor(),
+               videoInput.isReadyForMoreMediaData,
+               let copy = Self.copyNV12(frame, pool: copyPool ?? Self.makeNV12Pool(width: widthPx, height: heightPx)) {
+                if !adaptor.append(copy, withPresentationTime: end) {
+                    BSLog.warn("closing frame not appended: \(String(describing: writer.error))")
+                }
+            }
+            videoInput.markAsFinished()
+            audioInput?.markAsFinished()
+            // End the track at the take's end. Otherwise the last frame's
+            // duration defaults to the previous gap — after a static stretch
+            // that doubled the track (60 s take → 119 s screen.mov).
+            if sessionStarted, let end = lastPTS {
+                writer.endSession(atSourceTime: CMTimeAdd(end, CMTime(value: 1, timescale: CMTimeScale(fps))))
+            }
+            await writer.finishWriting()
+        }
+        BSLog.info("stopped — received=\(screenFramesReceived), filtered=\(screenFramesFiltered), notReady=\(screenFramesNotReady), appended=\(screenFramesAppended), segments=\(segments.count), recoveries=\(recoveries), copy idle=\(copyIdleFrames) drops(noPool/alloc)=\(copyDropsNoPool)/\(copyDropsAlloc), audio buffers=\(audioBuffersReceived) non-silent=\(audioBuffersNonSilent), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
         let stopError = readStreamStopError()
-
-        if writerStatus == .failed || writerStatus == .cancelled {
+        guard screenFramesAppended > 0, let origin = firstPTS, let outputURL else {
             throw ScreenRecorderError.writerFailed(
-                firstAppendFailure
-                ?? writerError?.localizedDescription
-                ?? "AVAssetWriter ended with status \(writerStatus.rawValue)"
+                firstAppendFailure ?? stopError?.localizedDescription ?? "no screen frames were written"
             )
+        }
+        let clean = segments.count == 1 && writer.status == .completed
+        if !clean {
+            // Recovered or partial take: rebuild screen.mov from whatever is
+            // readable. Only if nothing at all is readable is the take lost.
+            do {
+                try await Self.stitch(segments: segments, origin: origin, into: outputURL)
+                BSLog.warn("screen.mov rebuilt from \(segments.count) segment(s) after \(recoveries) encoder recovery(ies)")
+            } catch {
+                throw ScreenRecorderError.writerFailed(
+                    "\(firstAppendFailure ?? "screen encoder failed") — recovery failed: \(error)"
+                )
+            }
         }
         if let stopError {
-            throw ScreenRecorderError.writerFailed(
-                "SCStream stopped with error: \(stopError.localizedDescription)"
-            )
-        }
-        guard screenFramesAppended > 0 else {
-            throw ScreenRecorderError.noFramesWritten
+            BSLog.warn("SCStream reported an error before stop (footage kept): \(stopError.localizedDescription)")
         }
 
         let first = firstPTS ?? .zero
@@ -548,7 +935,26 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     ) {
         guard sampleBuffer.isValid else { return }
 
+        let now = CFAbsoluteTimeGetCurrent()
+        activityLock.lock()
         if type == .screen {
+            _activity.lastScreen = now; _activity.screenCallbacks += 1
+        } else {
+            _activity.lastAudio = now; _activity.audioCallbacks += 1
+        }
+        activityLock.unlock()
+        var sampleBuffer = sampleBuffer
+        if let pauseState, pauseState.overlaps(CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                                               duration: CMSampleBufferGetDuration(sampleBuffer)) {
+            // Paused: no picture; sound becomes silence (keeps its timeline).
+            guard type == .audio, let silent = SilentAudio.copyOrRecordFailure(of: sampleBuffer, source: "system") else { return }
+            sampleBuffer = silent
+        }
+        if type == .screen {
+            if let quiet = injectSilenceAfter, let origin = firstPTS,
+               CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), origin).seconds > quiet {
+                return
+            }
             screenFramesReceived += 1
             // Skip only frames we know are unusable: stopped, suspended.
             if let attachments = CMSampleBufferGetSampleAttachmentsArray(
@@ -563,11 +969,22 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                 }
                 return
             }
-            guard let videoInput else {
+            guard !writerHasFailed else { return }
+            // After a failure, give VideoToolbox a moment before reopening.
+            if lastFailureAt > 0, CFAbsoluteTimeGetCurrent() - lastFailureAt < 0.25, !sessionStarted { return }
+            writerLock.lock()
+            let writer = self.writer, videoInput = self.videoInput
+            writerLock.unlock()
+            guard let writer, let videoInput else {
                 BSLog.warn("videoInput is nil; dropping frame")
                 return
             }
-            guard !writerHasFailed else { return }
+            // A dead encoder can leave the input permanently "not ready", so the
+            // append-failure branch below would never fire. Check status first.
+            if Self.writerIsDead(writer.status) {
+                rollOverSegment(reason: String(describing: writer.error ?? ScreenRecorderError.writerFailed("writer status \(writer.status.rawValue)")))
+                return
+            }
             guard videoInput.isReadyForMoreMediaData else {
                 screenFramesNotReady += 1
                 if screenFramesNotReady % 60 == 1 {
@@ -577,39 +994,86 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             }
 
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            if firstPTS == nil {
-                firstPTS = pts
-                if let writer = writer {
-                    writer.startSession(atSourceTime: pts)
-                    BSLog.info("startSession at pts=\(pts.seconds), writer.status=\(writer.status.rawValue), error=\(String(describing: writer.error))")
-                }
+            if !sessionStarted {
+                writer.startSession(atSourceTime: pts)
+                writerLock.lock()
+                sessionStarted = true
+                if let k = segments.indices.last { segments[k].start = pts }
+                writerLock.unlock()
+                if firstPTS == nil { firstPTS = pts }
+                BSLog.info("startSession (segment \(segments.count)) at pts=\(pts.seconds), writer.status=\(writer.status.rawValue)")
             }
             lastPTS = pts
-            let ok = videoInput.append(sampleBuffer)
+            let ok: Bool
+            if copyFrames {
+                writerLock.lock(); let adaptor = self.adaptor; writerLock.unlock()
+                if copyPool == nil { copyPool = Self.makeNV12Pool(width: widthPx, height: heightPx) }
+                guard let src = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                    // SCK "idle" frame: the screen didn't change, nothing to encode.
+                    copyIdleFrames += 1
+                    return
+                }
+                guard let adaptor, let pool = copyPool else {
+                    copyDropsNoPool += 1
+                    return
+                }
+                guard let copy = Self.copyNV12(src, pool: pool) else {
+                    copyDropsAlloc += 1
+                    return
+                }
+                ok = adaptor.append(copy, withPresentationTime: pts)
+                if ok { lastEncodedFrame = copy; lastEncodedPTS = pts }
+            } else {
+                ok = videoInput.append(sampleBuffer)
+                if ok, let img = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                    lastEncodedFrame = img; lastEncodedPTS = pts
+                }
+            }
             if !ok {
                 screenAppendFailures += 1
-                let msg = String(describing: writer?.error)
+                let msg = String(describing: writer.error)
                 if firstAppendFailure == nil { firstAppendFailure = msg }
-                if let writer, writer.status == .failed || writer.status == .cancelled {
-                    writerHasFailed = true
+                BSLog.error("append failed (\(screenAppendFailures)), writer.status=\(writer.status.rawValue), writer.error=\(msg)")
+                if Self.writerIsDead(writer.status) {
+                    rollOverSegment(reason: msg)
                 }
-                BSLog.error("append failed (\(screenAppendFailures)), writer.status=\(writer?.status.rawValue ?? -1), writer.error=\(msg)")
                 return
             }
             screenFramesAppended += 1
-            if screenAppendFailures > 0 {
-                BSLog.warn("append recovered after \(screenAppendFailures) failures")
+            if CFAbsoluteTimeGetCurrent() - lastSizeLog >= 5 {
+                lastSizeLog = CFAbsoluteTimeGetCurrent()
+                writerLock.lock(); let segURL = segments.last?.url; writerLock.unlock()
+                let size = segURL.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int } ?? -1
+                BSLog.info("segment \(segments.count) on disk: \(size) bytes, writer.status=\(writer.status.rawValue), appended=\(screenFramesAppended)")
             }
             if screenFramesAppended % 60 == 1 {
                 BSLog.info("appended \(screenFramesAppended) frames")
             }
+            if let next = injectFailAtSeconds.first, let origin = firstPTS,
+               CMTimeSubtract(pts, origin).seconds >= next {
+                injectFailAtSeconds.removeFirst()
+                BSLog.warn("BS_INJECT_SCREEN_FAIL_AT_SECONDS: abandoning segment at \(CMTimeSubtract(pts, origin).seconds)s")
+                rollOverSegment(reason: "injected at \(next)s")
+                return
+            }
+            if injectFailAt.contains(screenFramesAppended) {
+                BSLog.warn("BS_INJECT_SCREEN_FAIL_AT_FRAMES: abandoning segment at frame \(screenFramesAppended)")
+                rollOverSegment(reason: "injected")
+            }
+            if injectCancelAt.contains(screenFramesAppended) {
+                BSLog.warn("BS_INJECT_SCREEN_CANCEL_AT_FRAMES: cancelling writer at frame \(screenFramesAppended)")
+                writer.cancelWriting()
+            }
             return
         }
 
-        if type == .audio, let audioInput, audioInput.isReadyForMoreMediaData {
-            // Defer audio until video has started the session — both share the same
-            // host-clock timebase, so once the writer's session is open audio appends correctly.
-            guard firstPTS != nil else { return }
+        if type == .audio {
+            writerLock.lock()
+            let audioInput = self.audioInput, open = sessionStarted
+            writerLock.unlock()
+            // Defer audio until video has started the (current segment's)
+            // session — both share the host-clock timebase.
+            guard open, let audioInput, audioInput.isReadyForMoreMediaData else { return }
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             if firstAudioPTS == nil { firstAudioPTS = pts }
             audioBuffersReceived += 1
@@ -622,11 +1086,28 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     // MARK: - SCStreamDelegate
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
+        handleStreamStopped(error)
+    }
+
+    /// Only the one known case is excused: the stream told us it stopped
+    /// (didStopWithError) AND stopCapture then says "already stopped"
+    /// (SCStreamError.attemptToStopStreamState). Any other stopCapture error
+    /// still fails the stop.
+    static func isExpectedStopFailure(_ error: Error, streamAlreadyStopped: Bool) -> Bool {
+        let ns = error as NSError
+        return streamAlreadyStopped
+            && ns.domain == SCStreamErrorDomain
+            && ns.code == SCStreamError.Code.attemptToStopStreamState.rawValue
+    }
+
+    /// Capture ended on its own: the user clicked macOS's "Stop Sharing"
+    /// (-3817), the display went away, … Footage up to here is intact
+    /// (stop() keeps it); the owner must finish the take — otherwise the app
+    /// sits in "recording" with nothing arriving and the bundle never closes.
+    func handleStreamStopped(_ error: Error) {
         BSLog.error("SCStream stopped with error: \(error)")
-        // Fold an async SCK stop error into the recorder's failure state so
-        // stop() reports a broken capture instead of silently returning a
-        // partial bundle.
         setStreamStopError(error)
+        onCaptureEnded?(error)
     }
 
     static func bufferContainsAudio(_ buffer: CMSampleBuffer) -> Bool {

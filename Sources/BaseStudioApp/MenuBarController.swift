@@ -9,15 +9,14 @@ final class MenuBarController {
     private var statusItem: NSStatusItem?
     private var elapsedTimer: Timer?
     private var startedAt: Date?
-    private var hotkeyMonitor: Any?
-    private var localHotkeyMonitor: Any?
+    private var pausedSince: Date?
+    private var pausedTotal: TimeInterval = 0
 
     var onStop: (() -> Void)?
     var onShowApp: (() -> Void)?
 
     func showIdle() {
         elapsedTimer?.invalidate(); elapsedTimer = nil
-        removeHotkey()
         startedAt = nil
 
         let item = ensureStatusItem()
@@ -36,9 +35,12 @@ final class MenuBarController {
         }
     }
 
+    /// Shortcut shown in the tooltip, only when it is registered.
+    var stopKey: String?
+
     func show() {
-        installHotkey()
         startedAt = Date()
+        pausedSince = nil; pausedTotal = 0
 
         let item = ensureStatusItem()
         if let button = item.button {
@@ -53,7 +55,7 @@ final class MenuBarController {
             button.contentTintColor = .systemRed
             button.font = .menuBarFont(ofSize: 0)
             button.title = " 0:00  Stop "
-            button.toolTip = "Click to stop recording  (⌘⇧.)"
+            button.toolTip = stopKey.map { "Click to stop recording  (\($0))" } ?? "Click to stop recording"
         }
 
         elapsedTimer?.invalidate()
@@ -73,10 +75,17 @@ final class MenuBarController {
         return item
     }
 
+    func setPaused(_ paused: Bool) {
+        if paused, pausedSince == nil { pausedSince = Date() }
+        else if !paused, let s = pausedSince { pausedTotal += Date().timeIntervalSince(s); pausedSince = nil }
+        tickTitle()
+    }
+
     private func tickTitle() {
         guard let startedAt, let button = statusItem?.button else { return }
-        let elapsed = BS.Format.mmss(Date().timeIntervalSince(startedAt))
-        button.title = " \(elapsed)  Stop "
+        let pausedNow = pausedSince.map { Date().timeIntervalSince($0) } ?? 0
+        let elapsed = BS.Format.mmss(Date().timeIntervalSince(startedAt) - pausedTotal - pausedNow)
+        button.title = pausedSince == nil ? " \(elapsed)  Stop " : " \(elapsed)  Paused · Stop "
     }
 
     @objc private func itemAction(_ sender: Any?) {
@@ -85,27 +94,5 @@ final class MenuBarController {
         } else {
             onShowApp?()
         }
-    }
-
-    // MARK: - hotkey ⌘⇧.
-
-    private func installHotkey() {
-        let mask: NSEvent.ModifierFlags = [.command, .shift]
-        hotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == mask,
-                  event.charactersIgnoringModifiers == "." else { return }
-            Task { @MainActor in self?.onStop?() }
-        }
-        localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == mask,
-                  event.charactersIgnoringModifiers == "." else { return event }
-            Task { @MainActor in self?.onStop?() }
-            return nil
-        }
-    }
-    private func removeHotkey() {
-        if let m = hotkeyMonitor { NSEvent.removeMonitor(m) }
-        if let m = localHotkeyMonitor { NSEvent.removeMonitor(m) }
-        hotkeyMonitor = nil; localHotkeyMonitor = nil
     }
 }

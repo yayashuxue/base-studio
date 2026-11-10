@@ -23,7 +23,7 @@ public enum SidecarLoader {
             let lx = gx - meta.displayOriginXPt
             let ly = gy - meta.displayOriginYPt
             // → display pixels (bottom-left, matches CIImage origin convention).
-            return (lx * meta.pointScale, ly * meta.pointScale)
+            return (lx * meta.pixelsPerPoint, ly * meta.pixelsPerPoint)
         }
 
         let cursor = raw.samples.map { s -> CursorPosSample in
