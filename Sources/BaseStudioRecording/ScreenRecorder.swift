@@ -444,6 +444,9 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
                     guard let self, self.isRunning, let current = self.streamAdapter,
                           current === thisTake else { return }
                     try? await thisTake.stopCapture()
+                    // Re-check after the await: the take may have ended (and
+                    // another begun) meanwhile — report only to this take.
+                    guard self.isRunning, let still = self.streamAdapter, still === thisTake else { return }
                     self.handleStreamStopped(NSError(domain: SCStreamErrorDomain, code: -3817,
                         userInfo: [NSLocalizedDescriptionKey: "injected: the user stopped the stream"]))
                 }
