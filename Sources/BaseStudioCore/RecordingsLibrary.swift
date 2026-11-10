@@ -67,8 +67,10 @@ public enum RecordingsLibrary {
             .sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
+    /// Moves the recording to the Trash (recoverable) — never a permanent
+    /// delete from inside the app.
     public static func delete(_ entry: Entry) throws {
-        try FileManager.default.removeItem(at: entry.id)
+        try FileManager.default.trashItem(at: entry.id, resultingItemURL: nil)
     }
 
     /// Rename the bundle by renaming its directory. Returns the new URL.

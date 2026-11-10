@@ -236,6 +236,53 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         }
     }
 
+    // MARK: - library selection (⌘A, ⌘/⇧-click, drag to select)
+
+    /// Recordings selected in the list for a bulk action.
+    @Published var librarySelection: Set<URL> = []
+    private var selectionAnchor: URL?
+
+    /// Click on a row: plain = open it (and select only it); ⌘ = toggle;
+    /// ⇧ = range from the last clicked row.
+    func clickRecording(_ entry: RecordingsLibrary.Entry, modifiers: NSEvent.ModifierFlags) {
+        if modifiers.contains(.command) {
+            if librarySelection.contains(entry.id) { librarySelection.remove(entry.id) } else { librarySelection.insert(entry.id) }
+            selectionAnchor = entry.id
+        } else if modifiers.contains(.shift), let anchor = selectionAnchor,
+                  let a = library.firstIndex(where: { $0.id == anchor }),
+                  let b = library.firstIndex(where: { $0.id == entry.id }) {
+            librarySelection.formUnion(library[min(a, b)...max(a, b)].map(\.id))
+        } else {
+            librarySelection = [entry.id]
+            selectionAnchor = entry.id
+            openRecording(entry)
+        }
+    }
+
+    func selectAllRecordings() { librarySelection = Set(library.map(\.id)) }
+    func clearRecordingSelection() { librarySelection = [] }
+
+    /// Confirm, then move every selected recording to the Trash.
+    func trashSelectedRecordings() {
+        let chosen = library.filter { librarySelection.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = chosen.count == 1 ? "Move this recording to the Trash?" : "Move \(chosen.count) recordings to the Trash?"
+        alert.informativeText = "You can restore them from the Trash."
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        var failed = 0
+        for entry in chosen {
+            do { try RecordingsLibrary.delete(entry) } catch { failed += 1; BSLog.error("trash \(entry.id.lastPathComponent): \(error)") }
+            if editorState?.bundleURL == entry.id { editorState = nil }
+            if lastBundle?.url == entry.id { lastBundle = nil }
+        }
+        librarySelection = []
+        refreshLibrary()
+        if failed > 0 { phase = .failed("\(failed) recording(s) couldn't be moved to the Trash.") }
+    }
+
     func deleteRecording(_ entry: RecordingsLibrary.Entry) {
         try? RecordingsLibrary.delete(entry)
         if editorState?.bundleURL == entry.id { editorState = nil }
