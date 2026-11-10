@@ -122,6 +122,9 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
     var onItemFailed: ((Error?) -> Void)?
 
     func prepare() async -> Bool {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        defer { BSLog.info(String(format: "preview prepare %.0f ms (ready=%@)", (CFAbsoluteTimeGetCurrent() - t0) * 1000,
+                                  String(player.currentItem?.status == .readyToPlay))) }
         if stale {
             stale = false
             let item = await makeItem()
@@ -162,6 +165,7 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+        BSLog.info(String(format: "preview start at %.2f s after %.0f ms of seeking", sec, (3 - deadline.timeIntervalSinceNow) * 1000))
         player.play()
         return true
     }
