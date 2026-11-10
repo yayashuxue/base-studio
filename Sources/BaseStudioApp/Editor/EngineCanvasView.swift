@@ -93,6 +93,15 @@ struct ScrubberView: View {
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 56)
+
+            Picker("", selection: $state.previewFullResolution) {
+                Text("Performance").tag(false)
+                Text("Full resolution").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Preview quality while playing. Export is always full resolution.")
         }
     }
 }

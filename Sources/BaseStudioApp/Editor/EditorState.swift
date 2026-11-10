@@ -383,7 +383,7 @@ final class EditorState: ObservableObject {
         // Scrubbing: draw quick, small frames while the playhead moves and a
         // full-quality one once it rests (julie: dragging the bar lagged).
         if !isPlaying {
-            stillScale = 0.4
+            stillScale = motionScale
             settleTimer?.invalidate()
             settleTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
                 Task { @MainActor in
@@ -437,6 +437,19 @@ final class EditorState: ObservableObject {
         }
     }
 
+    /// Preview quality while playing / scrubbing: Performance draws at 0.4×
+    /// (smooth on a busy Mac, visibly soft); Full resolution draws at 1×.
+    /// Paused frames are always full resolution. Remembered across launches.
+    @Published var previewFullResolution: Bool = UserDefaults.standard.bool(forKey: "PreviewFullResolution") {
+        didSet {
+            guard previewFullResolution != oldValue else { return }
+            UserDefaults.standard.set(previewFullResolution, forKey: "PreviewFullResolution")
+            previewAudio.stale = true
+            if isPlaying { pause(); play() }
+        }
+    }
+    private var motionScale: Double { previewFullResolution ? 1 : 0.4 }
+
     /// The player that shows playback (picture and sound).
     var previewPlayer: AVPlayer { previewAudio.player }
     /// true when the current playback item renders the picture itself.
@@ -450,7 +463,7 @@ final class EditorState: ObservableObject {
         do {
             let ctx = PreviewPlayback.Context(project: project, timeMap: timeMap, primary: primarySource,
                                               sidecars: sidecars, backgroundImage: backgroundImageCache)
-            let item = try await PreviewPlayback.makeItem(ctx, bundleURL: bundleURL, audio: sources)
+            let item = try await PreviewPlayback.makeItem(ctx, bundleURL: bundleURL, audio: sources, scale: motionScale)
             playerDrawsPicture = item.videoComposition != nil
             return item
         } catch {
