@@ -236,6 +236,16 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
         }
     }
 
+    /// Nothing would be lost by restarting the app now.
+    var isIdleForUpdate: Bool {
+        switch phase {
+        case .idle, .done, .failed: break
+        default: return false
+        }
+        if case .running = exportPhase { return false }
+        return true
+    }
+
     // MARK: - library selection (⌘A, ⌘/⇧-click, drag to select)
 
     /// Recordings selected in the list for a bulk action.

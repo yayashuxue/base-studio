@@ -13,6 +13,7 @@ struct ContentView: View {
     @StateObject private var vm = RecordingViewModel()
     @StateObject private var webcamPreview = WebcamPreviewSession()
     @StateObject private var screenPreview = ScreenPreviewSession()
+    @StateObject private var updater = AppUpdater()
 
     var body: some View {
         ZStack {
@@ -20,6 +21,7 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 topBar
+                if updater.updateReady { updateBanner }
                 BSHairline()
                 if let editor = vm.editorState {
                     editorPane(editor)
@@ -42,6 +44,12 @@ struct ContentView: View {
         }
         .preferredColorScheme(.light)
         .onAppear {
+            // Never during a self-test: it runs in the background and must
+            // not be restarted into another build mid-take.
+            if #available(macOS 13.0, *), !SelfTest.isRequested {
+                updater.isIdle = { [weak vm] in vm?.isIdleForUpdate ?? false }
+                updater.start()
+            }
             // The E2E self-test drives its own camera capture; don't let the UI
             // preview grab the camera too (two AVCaptureSessions collide).
             if #available(macOS 13.0, *), SelfTest.isRequested { return }
@@ -92,6 +100,22 @@ struct ContentView: View {
     }
 
     // MARK: - Top bar
+
+    /// A newer build is staged: offer the restart (it also happens by
+    /// itself when Base Studio is idle in the background).
+    private var updateBanner: some View {
+        HStack(spacing: BS.Space.tight) {
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(BS.Color.accent)
+            Text("A new version is ready.").font(BS.Font.label).foregroundStyle(BS.Color.textPrimary)
+            Spacer()
+            Button("Restart") { updater.restartIntoUpdate() }
+                .disabled(!vm.isIdleForUpdate)
+                .help(vm.isIdleForUpdate ? "Restart into the new version" : "Finish recording or exporting first")
+        }
+        .padding(.horizontal, BS.Space.regular)
+        .padding(.vertical, BS.Space.gap)
+        .background(BS.Color.accent.opacity(0.10))
+    }
 
     private var topBar: some View {
         HStack(spacing: BS.Space.snug) {
