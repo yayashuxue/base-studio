@@ -62,6 +62,18 @@ final class EditorScrubProbeTests: XCTestCase {
         let scaleBefore = editor.renderedImageScale
         await spin(0.6)
         XCTAssertEqual(editor.renderedImageScale, scaleBefore, "settle render fired while playing")
+        // …and the player started from the drag target, not an older seek.
+        print("SCRUB drag-then-play: player \(editor.previewPlayer.currentTime().seconds)")
+        XCTAssertGreaterThan(editor.previewPlayer.currentTime().seconds, 49.9)
+        XCTAssertLessThan(editor.previewPlayer.currentTime().seconds, 51.5)
+        // Rapid drags then play at once.
+        editor.pause()
+        for x in [20.0, 90.0, 60.0] { editor.setPlayhead(x) }
+        editor.play()
+        await spin(1.0)
+        print("SCRUB rapid drags then play: player \(editor.previewPlayer.currentTime().seconds)")
+        XCTAssertGreaterThan(editor.previewPlayer.currentTime().seconds, 59.9)
+        XCTAssertLessThan(editor.previewPlayer.currentTime().seconds, 61.5)
         editor.pause()
     }
 }

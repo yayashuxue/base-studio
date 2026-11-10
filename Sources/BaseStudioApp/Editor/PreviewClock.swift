@@ -143,9 +143,13 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
         return true
     }
 
+    /// Goes through the same chase as drags: the newest target wins and an
+    /// in-flight drag seek is waited for, so play starts where the playhead is.
     func start(at sec: Double) async {
-        await player.seek(to: CMTime(seconds: sec, preferredTimescale: 48_000),
-                          toleranceBefore: .zero, toleranceAfter: .zero)
+        seek(to: sec)
+        while seekInFlight || pendingSeek != nil {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
         player.play()
     }
 
