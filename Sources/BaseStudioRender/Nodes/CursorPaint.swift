@@ -54,7 +54,11 @@ public struct CursorPaint: VideoNode {
         let key = "\(Int(radius))_\(Int(alpha * 100))" as NSString
         if let s = haloCache.object(forKey: key) { return s }
         let pixelScale: CGFloat = 2
-        let dim = Int((radius * 2 + 4) * pixelScale)
+        // Room for the blur to fade out (3σ, σ = 0.4 r) inside the image:
+        // the canvas used to end at the circle, so the glow was cut off in a
+        // visible square around the cursor (julie: "a square mosaic").
+        let pad = radius * 1.3
+        let dim = Int((radius * 2 + pad * 2) * pixelScale)
         let cs = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: nil, width: dim, height: dim, bitsPerComponent: 8,
@@ -73,7 +77,7 @@ public struct CursorPaint: VideoNode {
         )
         // Soft blur for a gradient halo edge.
         // Rasterized: a lazily-evaluated blur re-ran on every frame.
-        let trimmed = RasterCache.image("halo|\(key)") {
+        let trimmed = RasterCache.image("halo2|\(key)") {
             raw.applyingGaussianBlur(sigma: Double(radius) * 0.4).cropped(to: raw.extent)
         }
         haloCache.setObject(trimmed, forKey: key)
