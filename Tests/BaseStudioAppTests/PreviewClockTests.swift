@@ -23,7 +23,8 @@ final class PreviewClockTests: XCTestCase {
             if prepareDelay > 0 { try? await Task.sleep(nanoseconds: prepareDelay) }
             return hasAudio
         }
-        func start(at sec: Double) async { started = sec; currentSeconds = sec }
+        var startSucceeds = true
+        func start(at sec: Double) async -> Bool { started = sec; currentSeconds = sec; return startSucceeds }
         func pause() {}
         func seek(to sec: Double) { currentSeconds = sec }
     }
@@ -88,6 +89,20 @@ final class PreviewClockTests: XCTestCase {
         try await Task.sleep(nanoseconds: 800_000_000)
         XCTAssertTrue(ended)
         XCTAssertFalse(clock.isRunning)
+    }
+
+    func testStartFailureFallsBackToTimer() async throws {
+        // Player can't start (seek never finished): the clock must not hang
+        // on it — it runs on its own timer.
+        let audio = FakeAudio()
+        audio.startSucceeds = false
+        let clock = PreviewClock(output: audio, interval: 0.02)
+        var last = 0.0
+        clock.onTick = { sec, _ in last = sec }
+        clock.play(from: 0, duration: 5)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        clock.pause()
+        XCTAssertGreaterThan(last, 0.1, "playback hung on a failed start")
     }
 
     func testPauseDuringPreparationNeverStartsSound() async throws {

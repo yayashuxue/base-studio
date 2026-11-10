@@ -7,8 +7,9 @@ import Foundation
 protocol PreviewAudioOutput: AnyObject {
     /// Build/refresh the audio for the current edit. false = no sound to play.
     func prepare() async -> Bool
-    /// Seek to `sec` (exactly) and start playing.
-    func start(at sec: Double) async
+    /// Seek to `sec` (exactly) and start playing. false = couldn't (the
+    /// clock then runs on its own timer instead of hanging).
+    func start(at sec: Double) async -> Bool
     func pause()
     func seek(to sec: Double)
     /// Where the sound is now, and where it ends (timeline seconds).
@@ -50,10 +51,10 @@ final class PreviewClock {
         seconds = sec
         self.duration = duration
         Task {
-            let hasAudio = await output.prepare()
+            var hasAudio = await output.prepare()
             guard isRunning, gen == generation else { return }
             if hasAudio, seconds < output.endSeconds {
-                await output.start(at: seconds)
+                hasAudio = await output.start(at: seconds)
                 guard isRunning, gen == generation else { return }
             }
             followsAudio = hasAudio
@@ -129,12 +130,13 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
         }
         guard let item = player.currentItem else { return false }
         // A built item can still fail to prepare (e.g. the compositor or a
-        // track); wait for a verdict (bounded) instead of assuming it plays.
-        for _ in 0..<100 where item.status == .unknown {
+        // track); wait for a verdict (bounded). Still undecided after 3 s
+        // counts as a failure — never assume it plays.
+        for _ in 0..<150 where item.status == .unknown {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
-        if item.status == .failed {
-            BSLog.error("preview item failed: \(String(describing: item.error))")
+        if item.status != .readyToPlay {
+            BSLog.error("preview item not ready (status \(item.status.rawValue)): \(String(describing: item.error))")
             player.replaceCurrentItem(with: nil)
             stale = true
             onItemFailed?(item.error)
@@ -145,12 +147,23 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
 
     /// Goes through the same chase as drags: the newest target wins and an
     /// in-flight drag seek is waited for, so play starts where the playhead is.
-    func start(at sec: Double) async {
+    func start(at sec: Double) async -> Bool {
         seek(to: sec)
+        // Bounded: a seek whose completion never comes must not hang play.
+        let deadline = Date().addingTimeInterval(3)
         while seekInFlight || pendingSeek != nil {
+            if Date() > deadline {
+                BSLog.error("preview seek to \(sec) s did not finish in 3 s — playing without the player clock")
+                player.currentItem?.cancelPendingSeeks()
+                seekInFlight = false
+                pendingSeek = nil
+                onItemFailed?(nil)   // editor shows per-frame stills instead of a stuck player
+                return false
+            }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         player.play()
+        return true
     }
 
     func pause() { player.pause() }
