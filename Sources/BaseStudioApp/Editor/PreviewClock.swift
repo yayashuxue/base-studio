@@ -151,9 +151,26 @@ final class PlayerPreviewAudio: PreviewAudioOutput {
 
     func pause() { player.pause() }
 
+    /// Chase seek (Apple QA1820): while a seek is in flight, remember only
+    /// the newest target and go there when it finishes. Firing a seek per
+    /// drag step let AVPlayer drop the last one — a drag to 80 s ended at 70 s.
+    private var seekInFlight = false
+    private var pendingSeek: Double?
+
     func seek(to sec: Double) {
-        player.seek(to: CMTime(seconds: sec, preferredTimescale: 48_000),
-                    toleranceBefore: .zero, toleranceAfter: .zero)
+        pendingSeek = sec
+        guard !seekInFlight else { return }
+        chase()
+    }
+
+    private func chase() {
+        guard let target = pendingSeek else { seekInFlight = false; return }
+        pendingSeek = nil
+        seekInFlight = true
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 48_000),
+                    toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in self?.chase() }
+        }
     }
 
     var currentSeconds: Double { player.currentTime().seconds }

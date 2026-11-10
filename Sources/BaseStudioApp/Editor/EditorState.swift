@@ -387,7 +387,8 @@ final class EditorState: ObservableObject {
             settleTimer?.invalidate()
             settleTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
                 Task { @MainActor in
-                    guard let self else { return }
+                    // Playing again: the player draws; no full-size still.
+                    guard let self, !self.isPlaying else { return }
                     self.stillScale = 1
                     self.scheduleRender()
                 }
@@ -396,6 +397,9 @@ final class EditorState: ObservableObject {
         scheduleRender()
     }
 
+    /// Timeline time and scale of the still currently shown (tests, diagnostics).
+    private(set) var renderedImagePTS: CMTime?
+    private(set) var renderedImageScale: Double = 1
     /// Render scale for the still preview: < 1 while scrubbing.
     private var stillScale: Double = 1
     private var settleTimer: Timer?
@@ -409,6 +413,8 @@ final class EditorState: ObservableObject {
     func play() {
         guard !isPlaying else { return }
         isPlaying = true
+        settleTimer?.invalidate()
+        stillScale = 1
         // 24fps for editor preview: per-frame HEVC decode + pipeline still
         // routinely exceeds 33ms on 4K screen recordings. Export still runs
         // at 60fps; this is a UI-only knob (PreviewClock's interval).
@@ -474,6 +480,8 @@ final class EditorState: ObservableObject {
             let image = await self.renderInternal(project: snapshot, at: pts, scale: scale)
             await MainActor.run {
                 self.renderedImage = image
+                self.renderedImagePTS = image == nil ? nil : pts
+                self.renderedImageScale = scale
                 self.renderInFlight = false
                 if self.renderPending {
                     self.runRender()
