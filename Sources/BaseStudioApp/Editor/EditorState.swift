@@ -382,16 +382,21 @@ final class EditorState: ObservableObject {
         clock.seek(to: playheadSec)
         // Scrubbing: draw quick, small frames while the playhead moves and a
         // full-quality one once it rests (julie: dragging the bar lagged).
-        if !isPlaying {
-            stillScale = motionScale
-            settleTimer?.invalidate()
-            settleTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
-                Task { @MainActor in
-                    // Playing again: the player draws; no full-size still.
-                    guard let self, !self.isPlaying else { return }
-                    self.stillScale = 1
-                    self.scheduleRender()
-                }
+        if !isPlaying { quickThenFullStill() } else { scheduleRender() }
+    }
+
+    /// A small still now, the full-quality one right after. Used for
+    /// scrubbing, opening a recording and pausing — on a busy Mac a
+    /// full-size still took seconds ("Loading preview" for ages, julie 11/10).
+    func quickThenFullStill() {
+        stillScale = motionScale
+        settleTimer?.invalidate()
+        settleTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                // Playing again: the player draws; no full-size still.
+                guard let self, !self.isPlaying else { return }
+                self.stillScale = 1
+                self.scheduleRender()
             }
         }
         scheduleRender()
@@ -424,7 +429,7 @@ final class EditorState: ObservableObject {
     func pause() {
         isPlaying = false
         clock.pause()
-        scheduleRender()   // full-quality still at the stop point
+        quickThenFullStill()   // a still at the stop point, quick first
     }
 
     /// Which audio the preview plays — the export's Audio choice, so what

@@ -41,7 +41,7 @@ struct EngineCanvasView: View {
                 }
             }
         }
-        .onAppear { state.scheduleRender() }
+        .onAppear { state.quickThenFullStill() }
     }
 }
 
