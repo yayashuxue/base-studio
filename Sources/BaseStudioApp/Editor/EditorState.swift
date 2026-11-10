@@ -427,13 +427,24 @@ final class EditorState: ObservableObject {
         scheduleRender()   // full-quality still at the stop point
     }
 
+    /// Which audio the preview plays — the export's Audio choice, so what
+    /// you hear while editing is what the file will contain.
+    var previewAudioMode: ExportPipeline.AudioMode = .both {
+        didSet {
+            guard previewAudioMode != oldValue else { return }
+            previewAudio.stale = true
+            if isPlaying { pause(); play() }   // rebuild with the new sources now
+        }
+    }
+
     /// The player that shows playback (picture and sound).
     var previewPlayer: AVPlayer { previewAudio.player }
     /// true when the current playback item renders the picture itself.
     @Published private(set) var playerDrawsPicture = false
 
     private func makePreviewAudioItem() async -> AVPlayerItem? {
-        let sources = await AudioPlan.sources(project: project, bundleURL: bundleURL, meta: recordingMeta)
+        let sources = await AudioPlan.sources(project: project, bundleURL: bundleURL, meta: recordingMeta,
+                                              mode: previewAudioMode)
         // Picture + sound through PreviewPlayback (off-main, hardware decode,
         // one clock). Falls back to sound only, with the old per-frame render.
         do {

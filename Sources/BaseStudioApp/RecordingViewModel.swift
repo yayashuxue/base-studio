@@ -95,7 +95,9 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     /// Self-view bubble while recording. Separate from `includeWebcam`:
     /// hiding the preview never stops the webcam recording.
     @Published var showCameraWhileRecording: Bool = true
-    @Published var editorState: EditorState?
+    @Published var editorState: EditorState? {
+        didSet { editorState?.previewAudioMode = exportAudio.pipelineMode }
+    }
     @Published var library: [RecordingsLibrary.Entry] = []
     @Published var displays: [DisplayInfo] = []
     @Published var windows: [WindowInfo] = []
@@ -139,6 +141,14 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
     enum ExportAudio: String, CaseIterable, Identifiable {
         case both, micOnly, systemOnly, mute
         var id: String { rawValue }
+        var pipelineMode: ExportPipeline.AudioMode {
+            switch self {
+            case .both: return .both
+            case .micOnly: return .micOnly
+            case .systemOnly: return .systemOnly
+            case .mute: return .mute
+            }
+        }
         var label: String {
             switch self {
             case .both: return "Both"
@@ -156,7 +166,11 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             }
         }
     }
-    @Published var exportAudio: ExportAudio = .both
+    @Published var exportAudio: ExportAudio = .both {
+        // The preview plays what the export will contain (julie: picking
+        // Mute/Mic/System "didn't work" — it only changed the export).
+        didSet { editorState?.previewAudioMode = exportAudio.pipelineMode }
+    }
 
     weak var webcamPreview: WebcamPreviewSession?
 
@@ -618,14 +632,7 @@ final class RecordingViewModel: ObservableObject, StopHandler, EditorActions {
             return (w & ~1, h & ~1)
         }()
 
-        let audioMode: ExportPipeline.AudioMode = {
-            switch exportAudio {
-            case .both: return .both
-            case .micOnly: return .micOnly
-            case .systemOnly: return .systemOnly
-            case .mute: return .mute
-            }
-        }()
+        let audioMode = exportAudio.pipelineMode
 
         Task { [weak self] in
             do {
