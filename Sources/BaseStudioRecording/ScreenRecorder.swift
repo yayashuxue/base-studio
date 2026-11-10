@@ -825,6 +825,14 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         screenQueue.sync {}
         audioQueue.sync {}
 
+        // The stream already ended on its own (macOS "Stop Sharing", -3817):
+        // stopCapture then fails with "already stopped" — that is expected,
+        // and the footage up to that point must still be finished and kept.
+        // (Live run 11/10: the take was thrown away instead.)
+        if stopCaptureError != nil, readStreamStopError() != nil {
+            BSLog.warn("stopCapture after the stream had already stopped: \(stopCaptureError!.localizedDescription) — finishing the take")
+            stopCaptureError = nil
+        }
         if let stopCaptureError {
             // Abnormal capture end — don't try to finalize a broken session.
             currentHandles().0?.cancelWriting()
