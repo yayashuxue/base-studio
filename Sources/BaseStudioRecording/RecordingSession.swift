@@ -152,6 +152,7 @@ public final class RecordingSession {
         // failure.json / edl.json can leak into this one.
         self.bundle = bundle
         state = .recording
+        SilentAudio.resetFailures()
 
         cursorRecorder.start()
 

@@ -9,7 +9,9 @@ cd "$(dirname "$0")/.."
 CONFIG="${1:-release}"
 BIN_NAME="BaseStudio"
 APP_NAME="Base Studio"
-APP="build/${APP_NAME}.app"
+# BS_OUT_DIR=build/staging builds the next version beside the running one;
+# the app swaps itself over when idle (AppUpdater).
+APP="${BS_OUT_DIR:-build}/${APP_NAME}.app"
 
 echo "→ Building (${CONFIG}) …"
 swift build -c "${CONFIG}"
@@ -24,11 +26,14 @@ fi
 
 echo "→ Assembling ${APP} …"
 rm -rf "${APP}"
+mkdir -p "$(dirname "${APP}")"
 mkdir -p "${APP}/Contents/MacOS"
 mkdir -p "${APP}/Contents/Resources"
 
 cp "${SRC_BIN}" "${APP}/Contents/MacOS/${BIN_NAME}"
 cp "Resources/Info.plist" "${APP}/Contents/Info.plist"
+# Build identity the app compares to find a newer staged build.
+/usr/libexec/PlistBuddy -c "Add :BSBuildID string $(git rev-parse --short HEAD 2>/dev/null || echo dev)-$(date +%s)" "${APP}/Contents/Info.plist"
 
 # Try to copy a generated icon if present; otherwise skip.
 if [[ -f "Resources/AppIcon.icns" ]]; then

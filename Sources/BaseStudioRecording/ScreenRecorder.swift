@@ -947,7 +947,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         if let pauseState, pauseState.overlaps(CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
                                                duration: CMSampleBufferGetDuration(sampleBuffer)) {
             // Paused: no picture; sound becomes silence (keeps its timeline).
-            guard type == .audio, let silent = SilentAudio.copy(of: sampleBuffer) else { return }
+            guard type == .audio, let silent = SilentAudio.copyOrRecordFailure(of: sampleBuffer, source: "system") else { return }
             sampleBuffer = silent
         }
         if type == .screen {

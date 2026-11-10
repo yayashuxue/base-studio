@@ -364,12 +364,31 @@ enum SelfTest {
                 }
                 // Reopened project carries the cut.
                 r.projectCuts = (try? EditorState.load(bundleURL: bundle.url).project.cuts.count) ?? -1
+                r.silenceFailures = SilentAudio.failures
+                // Timeline kept: each audio file ends where the picture ends
+                // (dropped paused audio made mic.m4a 10 s short).
+                if let meta {
+                    let s0 = meta.firstVideoPTS.cmTime.seconds
+                    let micURL = bundle.url.appendingPathComponent("mic.m4a")
+                    if let m0 = meta.micFirstPTS?.cmTime.seconds,
+                       let d = try? await AVURLAsset(url: micURL).load(.duration).seconds {
+                        r.audioEndVsPicture["mic"] = (m0 - s0 + d) - r.screenDurationSec
+                    }
+                    if let t = try? await AVURLAsset(url: bundle.screenURL).loadTracks(withMediaType: .audio).first,
+                       let tr = try? await t.load(.timeRange) {
+                        r.audioEndVsPicture["systemAudio"] = tr.end.seconds - r.screenDurationSec
+                    }
+                }
                 r.framesInPause = r.samplesInPause["screen"] ?? -1
                 // Every track that was recorded must be present, readable
                 // and empty inside the pause; missing/unreadable (-1) fails.
                 var expected: Set<String> = ["screen", "systemAudio", "cursor"]
                 if withWebcam { expected.formUnion(["webcam", "mic"]) }
-                r.pass = r.pass && r.pauses == 1 && r.projectCuts == 1
+                r.pass = r.pass && r.pauses == 1 && r.projectCuts == 1 && r.silenceFailures == 0
+                    // Stopped while paused, the picture ends at the pause but
+                    // the mic keeps writing silence until Stop — only a
+                    // resumed pause can be compared end to end.
+                    && (pauseStopAt != nil || r.audioEndVsPicture.values.allSatisfy { abs($0) < 1.0 })
                     && expected.isSubset(of: Set(r.samplesInPause.keys))
                     && r.samplesInPause.values.allSatisfy { $0 == 0 }
             }
@@ -486,8 +505,11 @@ enum SelfTest {
                 var ti = CMSampleTimingInfo()
                 guard CMSampleBufferGetSampleTimingInfo(sb, at: i, timingInfoOut: &ti) == noErr else { return -1 }
                 let t0 = ti.presentationTimeStamp.seconds
-                let t1 = t0 + (ti.duration.isValid ? ti.duration.seconds : 0)
-                if t1 > a && t0 < b { n += 1 }
+                // Video: a frame's stored duration runs to the next frame, so
+                // the last frame before a pause "lasts" across it — judge
+                // pictures by capture time. Audio: by its whole span.
+                let t1 = type == .video ? t0 : t0 + (ti.duration.isValid ? ti.duration.seconds : 0)
+                if type == .video ? (t0 > a && t0 < b) : (t1 > a && t0 < b) { n += 1 }
             }
         }
         return reader.status == .completed ? n : -1
@@ -771,6 +793,8 @@ enum SelfTest {
         var cursorTour: [String] = []
         var cursorWorstPt: Double = -1
         var samplesInPause: [String: Int] = [:]
+        var silenceFailures = -1
+        var audioEndVsPicture: [String: Double] = [:]
         var projectCuts = -1
         var exportError: String?
         var webcamTrack = false

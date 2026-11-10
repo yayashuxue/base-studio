@@ -61,7 +61,24 @@ public final class PauseState: @unchecked Sendable {
 /// buffers pulled every later sound earlier (live test 11/10: after a 10 s
 /// pause the sound ran 10 s ahead of the picture). A silent copy keeps the
 /// sound's timeline; the pause's cut then removes it with the picture.
-enum SilentAudio {
+public enum SilentAudio {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var _failures = 0
+    /// Paused audio buffers that couldn't be silenced (and so were dropped,
+    /// which would shift later sound). Must stay 0; logged and self-tested.
+    public static var failures: Int { lock.withLock { _failures } }
+    public static func resetFailures() { lock.withLock { _failures = 0 } }
+
+    /// The silent copy, or nil after counting and logging the failure.
+    static func copyOrRecordFailure(of buffer: CMSampleBuffer, source: String) -> CMSampleBuffer? {
+        if let s = copy(of: buffer) { return s }
+        let n = lock.withLock { () -> Int in _failures += 1; return _failures }
+        if n == 1 || n % 100 == 0 {
+            BSLog.error("pause: couldn't silence a \(source) audio buffer (\(n) so far) — format \(String(describing: CMSampleBufferGetFormatDescription(buffer)))")
+        }
+        return nil
+    }
+
     /// Same format, timing and length as `buffer`, all samples zero.
     static func copy(of buffer: CMSampleBuffer) -> CMSampleBuffer? {
         guard let format = CMSampleBufferGetFormatDescription(buffer),
