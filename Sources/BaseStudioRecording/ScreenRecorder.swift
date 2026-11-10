@@ -436,10 +436,14 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             if let at = injectStreamStopAt {
                 // Test-only: end the real stream as macOS "Stop Sharing" does,
                 // so stop() meets the genuine "already stopped" error.
+                // Bound to THIS take's adapter: a stale task must never stop
+                // a later take's stream; a cancelled sleep does nothing.
+                let thisTake = adapter
                 Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: UInt64(at * 1_000_000_000))
-                    guard let self, let adapter = self.streamAdapter else { return }
-                    try? await adapter.stopCapture()
+                    do { try await Task.sleep(nanoseconds: UInt64(at * 1_000_000_000)) } catch { return }
+                    guard let self, self.isRunning, let current = self.streamAdapter,
+                          current === thisTake else { return }
+                    try? await thisTake.stopCapture()
                     self.handleStreamStopped(NSError(domain: SCStreamErrorDomain, code: -3817,
                         userInfo: [NSLocalizedDescriptionKey: "injected: the user stopped the stream"]))
                 }
