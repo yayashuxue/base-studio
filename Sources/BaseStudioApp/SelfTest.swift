@@ -421,12 +421,14 @@ enum SelfTest {
         var out: [String: Int] = [:]
         let screen0 = meta.firstVideoPTS.cmTime.seconds
         out["screen"] = await count(bundle.screenURL, .video, a - screen0, b - screen0)
-        out["systemAudio"] = await count(bundle.screenURL, .audio, a - screen0, b - screen0)
+        // Audio keeps its timeline through a pause as silence (SilentAudio),
+        // so for audio "nothing recorded" = no sound above silence there.
+        out["systemAudio"] = await loudSamples(bundle.screenURL, a - screen0, b - screen0)
         if let w0 = meta.sources?[SourceID.webcam]?.firstVideoPTS.cmTime.seconds {
             out["webcam"] = await count(bundle.url.appendingPathComponent("webcam.mov"), .video, a - w0, b - w0)
         }
         if let m0 = meta.micFirstPTS?.cmTime.seconds {
-            out["mic"] = await count(bundle.url.appendingPathComponent("mic.m4a"), .audio, a - m0, b - m0)
+            out["mic"] = await loudSamples(bundle.url.appendingPathComponent("mic.m4a"), a - m0, b - m0)
         }
         out["cursor"] = -1
         if let data = try? Data(contentsOf: bundle.cursorURL),
@@ -442,6 +444,29 @@ enum SelfTest {
             out["cursor"] = times.contains(where: { $0 == nil }) ? -1 : times.compactMap { $0 }.filter { $0 > a && $0 < b }.count
         }
         return out
+    }
+
+    /// Decoded audio samples louder than silence (|x| > 0.001) in (a, b)
+    /// file seconds; -1 if the track is missing or can't be read.
+    static func loudSamples(_ url: URL, _ a: Double, _ b: Double) async -> Int {
+        let asset = AVURLAsset(url: url)
+        guard b > a, let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let reader = try? AVAssetReader(asset: asset) else { return -1 }
+        reader.timeRange = CMTimeRange(start: CMTime(seconds: max(0, a), preferredTimescale: 48_000),
+                                       end: CMTime(seconds: b, preferredTimescale: 48_000))
+        let out = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false])
+        reader.add(out)
+        guard reader.startReading() else { return -1 }
+        var loud = 0
+        while let sb = out.copyNextSampleBuffer(), let bb = CMSampleBufferGetDataBuffer(sb) {
+            let len = CMBlockBufferGetDataLength(bb)
+            var f = [Float](repeating: 0, count: len / 4)
+            CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: len, destination: &f)
+            loud += f.reduce(0) { $0 + (abs($1) > 0.001 ? 1 : 0) }
+        }
+        return reader.status == .completed ? loud : -1
     }
 
     /// Samples of the first `type` track overlapping (a, b) file seconds,

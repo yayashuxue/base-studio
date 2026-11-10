@@ -23,6 +23,9 @@ final class SelfTestPauseCheckTests: XCTestCase {
         let n = await SelfTest.count(url, .audio, 1.0, 2.0)
         XCTAssertGreaterThanOrEqual(n, 46)
         XCTAssertLessThanOrEqual(n, 49)
+        // The file above is all zeros: no loud samples anywhere.
+        let quiet = await SelfTest.loudSamples(url, 0.5, 2.5)
+        XCTAssertEqual(quiet, 0, "silence must read as silence")
         let noVideo = await SelfTest.count(url, .video, 1.0, 2.0)
         XCTAssertEqual(noVideo, -1, "missing track must not read as 0")
         let noFile = await SelfTest.count(url.deletingLastPathComponent().appendingPathComponent("nope.m4a"), .audio, 0, 1)

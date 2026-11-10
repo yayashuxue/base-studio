@@ -179,7 +179,13 @@ public final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     ) {
         guard sampleBuffer.isValid, let audioInput, audioInput.isReadyForMoreMediaData else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        if let pauseState, pauseState.overlaps(pts, duration: CMSampleBufferGetDuration(sampleBuffer)) { return }
+        var sampleBuffer = sampleBuffer
+        if let pauseState, pauseState.overlaps(pts, duration: CMSampleBufferGetDuration(sampleBuffer)) {
+            // Paused: write silence, not nothing — dropped buffers would pull
+            // the rest of the take's sound earlier (see SilentAudio).
+            guard let silent = SilentAudio.copy(of: sampleBuffer) else { return }
+            sampleBuffer = silent
+        }
         if firstPTS == nil {
             firstPTS = pts
             writer?.startSession(atSourceTime: pts)

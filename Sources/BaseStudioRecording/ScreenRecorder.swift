@@ -943,8 +943,13 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             _activity.lastAudio = now; _activity.audioCallbacks += 1
         }
         activityLock.unlock()
+        var sampleBuffer = sampleBuffer
         if let pauseState, pauseState.overlaps(CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-                                               duration: CMSampleBufferGetDuration(sampleBuffer)) { return }
+                                               duration: CMSampleBufferGetDuration(sampleBuffer)) {
+            // Paused: no picture; sound becomes silence (keeps its timeline).
+            guard type == .audio, let silent = SilentAudio.copy(of: sampleBuffer) else { return }
+            sampleBuffer = silent
+        }
         if type == .screen {
             if let quiet = injectSilenceAfter, let origin = firstPTS,
                CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), origin).seconds > quiet {
