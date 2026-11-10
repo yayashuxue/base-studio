@@ -140,6 +140,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
     /// Test-only (`BS_INJECT_SCREEN_SILENCE_AFTER_SECONDS=10`): ignore every
     /// screen frame after this point, as a locked/sleeping display does.
     private var injectSilenceAfter: Double?
+    private var injectStreamStopAt: Double?
     public private(set) var screenRecoveryCount: Int = 0
     /// Software H.264 instead of VideoToolbox hardware (experiment: BS_FORCE_SW_ENCODER=1).
     private var useSoftwareEncoder = ProcessInfo.processInfo.environment["BS_FORCE_SW_ENCODER"] == "1"
@@ -400,6 +401,7 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.injectFailAt = Self.frameList("BS_INJECT_SCREEN_FAIL_AT_FRAMES")
         self.injectCancelAt = Self.frameList("BS_INJECT_SCREEN_CANCEL_AT_FRAMES")
         self.injectSilenceAfter = ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_SILENCE_AFTER_SECONDS"].flatMap(Double.init)
+        self.injectStreamStopAt = ProcessInfo.processInfo.environment["BS_INJECT_STREAM_STOP_AT_SECONDS"].flatMap(Double.init)
         self.injectFailAtSeconds = (ProcessInfo.processInfo.environment["BS_INJECT_SCREEN_FAIL_AT_SECONDS"] ?? "")
             .split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.sorted()
         self.writer = writer
@@ -431,6 +433,17 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
             try await attachAndStart(adapter: adapter, captureAudio: captureSystemAudio)
             self.isRunning = true
             startWatchdog()
+            if let at = injectStreamStopAt {
+                // Test-only: end the real stream as macOS "Stop Sharing" does,
+                // so stop() meets the genuine "already stopped" error.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(at * 1_000_000_000))
+                    guard let self, let adapter = self.streamAdapter else { return }
+                    try? await adapter.stopCapture()
+                    self.handleStreamStopped(NSError(domain: SCStreamErrorDomain, code: -3817,
+                        userInfo: [NSLocalizedDescriptionKey: "injected: the user stopped the stream"]))
+                }
+            }
             BSLog.info("screen recorder started — displayID=\(displayUsed.displayID), size=\(widthPxFinal)x\(heightPxFinal), fps=\(fps), pixelFormat=420v, codec=h264, systemAudio=\(captureSystemAudio), softwareEncoder=\(useSoftwareEncoder)")
         } catch {
             BSLog.error("screen start failed after startWriting — rolling back writer/stream: \(error)")
@@ -829,8 +842,8 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
         // stopCapture then fails with "already stopped" — that is expected,
         // and the footage up to that point must still be finished and kept.
         // (Live run 11/10: the take was thrown away instead.)
-        if stopCaptureError != nil, readStreamStopError() != nil {
-            BSLog.warn("stopCapture after the stream had already stopped: \(stopCaptureError!.localizedDescription) — finishing the take")
+        if let e = stopCaptureError, Self.isExpectedStopFailure(e, streamAlreadyStopped: readStreamStopError() != nil) {
+            BSLog.warn("stopCapture after the stream had already stopped: \(e.localizedDescription) — finishing the take")
             stopCaptureError = nil
         }
         if let stopCaptureError {
@@ -1062,6 +1075,17 @@ public final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
         handleStreamStopped(error)
+    }
+
+    /// Only the one known case is excused: the stream told us it stopped
+    /// (didStopWithError) AND stopCapture then says "already stopped"
+    /// (SCStreamError.attemptToStopStreamState). Any other stopCapture error
+    /// still fails the stop.
+    static func isExpectedStopFailure(_ error: Error, streamAlreadyStopped: Bool) -> Bool {
+        let ns = error as NSError
+        return streamAlreadyStopped
+            && ns.domain == SCStreamErrorDomain
+            && ns.code == SCStreamError.Code.attemptToStopStreamState.rawValue
     }
 
     /// Capture ended on its own: the user clicked macOS's "Stop Sharing"

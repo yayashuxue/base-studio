@@ -1,3 +1,4 @@
+import ScreenCaptureKit
 import XCTest
 @testable import BaseStudioRecording
 
@@ -19,5 +20,21 @@ final class CaptureEndedTests: XCTestCase {
                                   userInfo: [NSLocalizedDescriptionKey: "The user stopped the stream"])
         session.screenRecorderForTests.handleStreamStopped(userStopped)
         wait(for: [fired], timeout: 1)
+    }
+}
+
+/// stop() may excuse a stopCapture failure only in the known case.
+@available(macOS 13.0, *)
+final class ExpectedStopFailureTests: XCTestCase {
+    func testOnlyAlreadyStoppedAfterTheStreamStoppedIsExcused() {
+        let already = NSError(domain: SCStreamErrorDomain, code: SCStreamError.Code.attemptToStopStreamState.rawValue)
+        let other = NSError(domain: SCStreamErrorDomain, code: SCStreamError.Code.internalError.rawValue)
+        let foreign = NSError(domain: NSOSStatusErrorDomain, code: SCStreamError.Code.attemptToStopStreamState.rawValue)
+        XCTAssertTrue(ScreenRecorder.isExpectedStopFailure(already, streamAlreadyStopped: true))
+        XCTAssertFalse(ScreenRecorder.isExpectedStopFailure(already, streamAlreadyStopped: false),
+                       "without the stream's own stop report it's a real failure")
+        XCTAssertFalse(ScreenRecorder.isExpectedStopFailure(other, streamAlreadyStopped: true),
+                       "a different SCK error must not hide behind the stream stop")
+        XCTAssertFalse(ScreenRecorder.isExpectedStopFailure(foreign, streamAlreadyStopped: true))
     }
 }
